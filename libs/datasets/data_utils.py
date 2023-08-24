@@ -110,3 +110,8 @@ def truncate_feats(
     data_dict['labels'] = data_dict['labels'][seg_idx].clone()
 
     return data_dict
+
+def truncate_audio_feats(audio_feats, st, ed, feat_stride, sample_rate):
+    audio_start = int(st * feat_stride / sample_rate * audio_feats.shape[1])
+    audio_end = int(ed * feat_stride / sample_rate * audio_feats.shape[1])
+    return audio_feats[:, audio_start:audio_end]

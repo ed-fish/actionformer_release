@@ -420,7 +420,7 @@ def valid_one_epoch(
     results['t-end'] = torch.cat(results['t-end']).numpy()
     results['label'] = torch.cat(results['label']).numpy()
     results['score'] = torch.cat(results['score']).numpy()
-
+    
     if evaluator is not None:
         if ext_score_file is not None and isinstance(ext_score_file, str):
             results = postprocess_results(results, ext_score_file)

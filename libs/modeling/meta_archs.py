@@ -10,6 +10,8 @@ from .losses import ctr_diou_loss_1d, sigmoid_focal_loss
 
 from ..utils import batched_nms
 
+import matplotlib.pyplot as plt
+
 class PtTransformerClsHead(nn.Module):
     """
     1D Conv heads for classification
@@ -228,6 +230,7 @@ class PtTransformer(nn.Module):
         self.train_dropout = train_cfg['dropout']
         self.train_droppath = train_cfg['droppath']
         self.train_label_smoothing = train_cfg['label_smoothing']
+        self.use_audio = train_cfg['use_audio']
 
         # test time config
         self.test_pre_nms_thresh = test_cfg['pre_nms_thresh']
@@ -332,7 +335,11 @@ class PtTransformer(nn.Module):
 
     def forward(self, video_list):
         # batch the video list into feats (B, C, T) and masks (B, 1, T)
-        batched_inputs, batched_masks = self.preprocessing(video_list)
+        if self.use_audio:
+            batched_inputs, batched_masks = self.preprocessing_audio(video_list)
+        else: 
+            batched_inputs, batched_masks = self.preprocessing(video_list)
+
 
         # forward the network (backbone -> neck -> heads)
         feats, masks = self.backbone(batched_inputs, batched_masks)
@@ -425,6 +432,45 @@ class PtTransformer(nn.Module):
         batched_masks = batched_masks.unsqueeze(1).to(self.device)
 
         return batched_inputs, batched_masks
+    
+    @torch.no_grad()
+    def preprocessing_audio(self, video_list, padding_val=0.0):
+        """
+            Generate batched features and masks from a list of dict items
+        """
+        feats = [x['feats'] for x in video_list]
+
+        feats_lens = torch.as_tensor([feat.shape[-1] for feat in feats])
+
+        max_len = feats_lens.max(0).values.item()
+
+        def process_feats(feats, feats_lens, max_len, padding_val):
+            if self.training:
+                assert max_len <= self.max_seq_len, "Input length must be smaller than max_seq_len during training"
+                max_len = self.max_seq_len
+                batch_shape = [len(feats), feats[0].shape[0], max_len]
+                batched_inputs = feats[0].new_full(batch_shape, padding_val)
+                for feat, pad_feat in zip(feats, batched_inputs):
+                    pad_feat[..., :feat.shape[-1]].copy_(feat)
+            else:
+                assert len(video_list) == 1, "Only support batch_size = 1 during inference"
+                if max_len <= self.max_seq_len:
+                    max_len = self.max_seq_len
+                else:
+                    stride = self.max_div_factor
+                    max_len = (max_len + (stride - 1)) // stride * stride
+                padding_size = [0, max_len - feats_lens[0]]
+                batched_inputs = F.pad(feats[0], padding_size, value=padding_val).unsqueeze(0)
+
+            batched_masks = torch.arange(max_len)[None, :] < feats_lens[:, None]
+
+            return batched_inputs.to(self.device), batched_masks.unsqueeze(1).to(self.device)
+
+        # Process video features
+        batched_feats, batched_masks = process_feats(feats, feats_lens, max_len, padding_val)
+        # Process audio features
+
+        return batched_feats, batched_masks
 
     @torch.no_grad()
     def label_points(self, points, gt_segments, gt_labels):

@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from libs.core import load_config
 from libs.datasets import make_dataset, make_data_loader
 from libs.modeling import make_meta_arch
-from libs.utils import (train_one_epoch, valid_one_epoch, ANETdetection,
+from libs.utils import (train_one_epoch, validate_step, ANETdetection,
                         save_checkpoint, make_optimizer, make_scheduler,
                         fix_random_seed, ModelEma)
 
@@ -68,7 +68,16 @@ def main(args):
     # data loaders
     train_loader = make_data_loader(
         train_dataset, True, rng_generator, **cfg['loader'])
-
+    
+    val_dataset = make_dataset(
+        cfg['dataset_name'], False, cfg['val_split'], **cfg['dataset']
+    )
+    
+    # set bs = 1, and disable shuffle
+    val_loader = make_data_loader(
+        val_dataset, False, None, 1, cfg['loader']['num_workers']
+    )
+    
     """3. create model, optimizer, and scheduler"""
     # model
     model = make_meta_arch(cfg['model_name'], **cfg['model'])
@@ -132,6 +141,17 @@ def main(args):
             tb_writer=tb_writer,
             print_freq=args.print_freq
         )
+        
+        
+        validate_step(
+            val_loader,
+            model,
+            epoch,
+            tb_writer=tb_writer,
+            print_freq=args.print_freq
+        )
+        
+        
 
         # save ckpt once in a while
         if (

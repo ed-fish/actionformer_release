@@ -8,14 +8,17 @@ dataset: {
   file_prefix: ~,
   file_ext: .npy,
   num_classes: 20,
-  input_dim: 2176,
+  input_dim: 2048, #!if [ "$(audio_dataset_fuse)" = "concat" ] then 2176 else 2048,
   feat_stride: 4,
   num_frames: 16,
   # serve as data augmentation
   trunc_thresh: 0.5,
   crop_ratio: [0.9, 1.0],
   max_seq_len: 2304,
+  use_audio: True,
+  audio_dataset_fuse: None,
 }
+
 model: {
   fpn_type: identity,
   max_buffer_len_factor: 6.0,
@@ -35,7 +38,9 @@ train_cfg: {
   cls_prior_prob: 0.01,
   center_sample: radius,
   center_sample_radius: 1.5,
-  use_audio: True
+  use_audio: True,
+  audio_input_dim: 128,
+  audio_fusion_stage: backbone
 }
 test_cfg: {
   voting_thresh: 0.7,

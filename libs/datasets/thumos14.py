@@ -8,7 +8,7 @@ from torch.nn import functional as F
 import torchaudio
 
 from .datasets import register_dataset
-from .data_utils import truncate_feats, truncate_audio_feats
+from .data_utils import truncate_feats
 from torchaudio.transforms import MelSpectrogram
 
 from scipy.interpolate import interp1d
@@ -213,7 +213,10 @@ class THUMOS14AudioDataset(Dataset):
         num_classes,     # number of action categories
         file_prefix,     # feature file prefix if any
         file_ext,        # feature file extension if any
-        force_upsampling # force to upsample to max_seq_len
+        force_upsampling, # force to upsample to max_seq_len
+        audio_dataset_fuse, # If fusion of audio data or not
+        use_audio,
+        
     ):
         # file path
         print(feat_folder)
@@ -245,6 +248,7 @@ class THUMOS14AudioDataset(Dataset):
         self.num_classes = num_classes
         self.label_dict = None
         self.crop_ratio = crop_ratio
+        self.audio_dataset_fuse = audio_dataset_fuse
 
         # load database and select the subset
         dict_db, label_dict = self._load_json_db(self.json_file)
@@ -341,41 +345,38 @@ class THUMOS14AudioDataset(Dataset):
         audio_feats = np.load(audio_file).astype(np.float32) / 255
 
         # Determine the repetition factor and the exact number of temporal features
+        if self.audio_dataset_fuse == "concat":
         
-        video_to_audio_ratio = feats.shape[0] / audio_feats.shape[0]
-        repeat_factor = int(np.floor(video_to_audio_ratio))
-        remainder = video_to_audio_ratio - repeat_factor
-        repeated_audio_feats = np.zeros((feats.shape[0], audio_feats.shape[1]))
-        
-        
-        # Repeat each temporal audio feature 'repeat_factor' times
-        for i in range(audio_feats.shape[0] - 1):
-            repeated_audio_feats[i * repeat_factor: (i + 1) * repeat_factor] = audio_feats[i]
-
-        # Repeat the last temporal audio feature for the remaining video features
-        repeated_audio_feats[(i + 1) * repeat_factor:] = audio_feats[-1]
-
-        # Handle the remainder by interpolating with the next audio feature if needed
-        if remainder > 0:
+            video_to_audio_ratio = feats.shape[0] / audio_feats.shape[0]
+            repeat_factor = int(np.floor(video_to_audio_ratio))
+            remainder = video_to_audio_ratio - repeat_factor
+            repeated_audio_feats = np.zeros((feats.shape[0], audio_feats.shape[1]))
+             
+            # Repeat each temporal audio feature 'repeat_factor' times
             for i in range(audio_feats.shape[0] - 1):
-                mix_factor = remainder / repeat_factor
-                mixed_feature = audio_feats[i] * (1 - mix_factor) + audio_feats[i + 1] * mix_factor
-                repeated_audio_feats[(i+1)*repeat_factor-1] += mixed_feature * remainder
+                repeated_audio_feats[i * repeat_factor: (i + 1) * repeat_factor] = audio_feats[i]
 
-        # Transpose to match your original shape
-        repeated_audio_feats = repeated_audio_feats.transpose(1, 0)
-        feats = feats.transpose(1, 0)
+            # Repeat the last temporal audio feature for the remaining video features
+            repeated_audio_feats[(i + 1) * repeat_factor:] = audio_feats[-1]
 
+            # Handle the remainder by interpolating with the next audio feature if needed
+            if remainder > 0:
+                for i in range(audio_feats.shape[0] - 1):
+                    mix_factor = remainder / repeat_factor
+                    mixed_feature = audio_feats[i] * (1 - mix_factor) + audio_feats[i + 1] * mix_factor
+                    repeated_audio_feats[(i+1)*repeat_factor-1] += mixed_feature * remainder
 
-        # Repeat each temporal feature and handle the remainder
-            
+            # Transpose to match your original shape
+            repeated_audio_feats = repeated_audio_feats.transpose(1, 0) 
+            repeated_audio_feats = torch.from_numpy(repeated_audio_feats)
+        
 
-        # Transpose and convert to PyTorch tensors
         feats = torch.from_numpy(feats)
-        repeated_audio_feats = torch.from_numpy(repeated_audio_feats)
-
-        # Concatenate the repeated audio features with the video features
-        combined_feats = torch.cat((feats, repeated_audio_feats), dim=0).float()
+        feats = feats.transpose(1, 0)
+        audio_feats = audio_feats.transpose(1, 0)
+        
+        if self.audio_dataset_fuse == "concat": 
+            feats = torch.cat((feats, repeated_audio_feats), dim=0).float()
 
         # Process segments and labels
         feat_stride = self.feat_stride * self.downsample_rate
@@ -389,7 +390,7 @@ class THUMOS14AudioDataset(Dataset):
         # Prepare the data dictionary
         data_dict = {
             'video_id': video_item['id'],
-            'feats': combined_feats,      # C x T
+            'feats': feats,      # C x T
             'segments': segments,         # N x 2
             'labels': labels,             # N
             'fps': video_item['fps'],
@@ -403,5 +404,7 @@ class THUMOS14AudioDataset(Dataset):
             data_dict = truncate_feats(data_dict, self.max_seq_len, self.trunc_thresh, feat_offset, self.crop_ratio)
             trunc_start = data_dict['segments'][0, 0] + feat_offset
             trunc_end = data_dict['segments'][-1, 1] - feat_offset
+        if self.audio_dataset_fuse != "concat":
+            data_dict["audio_feats"] = torch.from_numpy(audio_feats)
 
         return data_dict

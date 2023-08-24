@@ -231,6 +231,7 @@ class PtTransformer(nn.Module):
         self.train_droppath = train_cfg['droppath']
         self.train_label_smoothing = train_cfg['label_smoothing']
         self.use_audio = train_cfg['use_audio']
+        self.audio_fusion_stage = train_cfg['audio_fusion_stage']
 
         # test time config
         self.test_pre_nms_thresh = test_cfg['pre_nms_thresh']
@@ -244,6 +245,7 @@ class PtTransformer(nn.Module):
         self.test_multiclass_nms = test_cfg['multiclass_nms']
         self.test_nms_sigma = test_cfg['nms_sigma']
         self.test_voting_thresh = test_cfg['voting_thresh']
+        
 
         # we will need a better way to dispatch the params to backbones / necks
         # backbone network: conv + transformer
@@ -280,6 +282,42 @@ class PtTransformer(nn.Module):
                     'with_ln' : embd_with_ln
                 }
             )
+        
+        if self.use_audio:
+            
+            if backbone_type == 'convTransformer':
+                self.audio_backbone = make_backbone(
+                    'convTransformer',
+                    **{
+                        'n_in' : train_cfg["audio_input_dim"],
+                        'n_embd' : embd_dim,
+                        'n_head': n_head,
+                        'n_embd_ks': embd_kernel_size,
+                        'max_len': max_seq_len,
+                        'arch' : backbone_arch,
+                        'mha_win_size': self.mha_win_size,
+                        'scale_factor' : scale_factor,
+                        'with_ln' : embd_with_ln,
+                        'attn_pdrop' : 0.0,
+                        'proj_pdrop' : self.train_dropout,
+                        'path_pdrop' : self.train_droppath,
+                        'use_abs_pe' : use_abs_pe,
+                        'use_rel_pe' : use_rel_pe
+                    }
+                )
+            else: 
+                self.backbone = make_backbone(
+                    'conv',
+                    **{
+                        'n_in': train_cfg["audio_input_dim"],
+                        'n_embd': embd_dim,
+                        'n_embd_ks': embd_kernel_size,
+                        'arch': backbone_arch,
+                        'scale_factor': scale_factor,
+                        'with_ln' : embd_with_ln
+                    }
+                )
+                 
         if isinstance(embd_dim, (list, tuple)):
             embd_dim = sum(embd_dim)
 
@@ -336,13 +374,26 @@ class PtTransformer(nn.Module):
     def forward(self, video_list):
         # batch the video list into feats (B, C, T) and masks (B, 1, T)
         if self.use_audio:
-            batched_inputs, batched_masks = self.preprocessing_audio(video_list)
+            batched_inputs, batched_masks, batched_a_inputs, batched_a_masks = self.preprocessing_audio(video_list)
         else: 
             batched_inputs, batched_masks = self.preprocessing(video_list)
 
 
         # forward the network (backbone -> neck -> heads)
         feats, masks = self.backbone(batched_inputs, batched_masks)
+        
+        if self.use_audio:
+            a_feats, a_masks = self.audio_backbone(batched_a_inputs, batched_a_masks)
+            combined_feats = []
+            if self.audio_fusion_stage == "backbone":
+                for t1, t2 in zip(feats, a_feats):
+                    if t1.shape != t2.shape:
+                        breakpoint()
+                        raise ValueError("Tensors must be same shape")
+                    combined_feats.append(t1 + t2)
+            feats = tuple(combined_feats)
+                    
+            
         fpn_feats, fpn_masks = self.neck(feats, masks)
 
         # compute the point coordinate along the FPN
@@ -439,10 +490,13 @@ class PtTransformer(nn.Module):
             Generate batched features and masks from a list of dict items
         """
         feats = [x['feats'] for x in video_list]
+        audio_feats = [x['audio_feats'] for x in video_list]
 
         feats_lens = torch.as_tensor([feat.shape[-1] for feat in feats])
+        audio_feats_lens = torch.as_tensor([audio_feat.shape[-1] for audio_feat in audio_feats] )
 
         max_len = feats_lens.max(0).values.item()
+        max_audio_len = audio_feats_lens.max(0).values.item()
 
         def process_feats(feats, feats_lens, max_len, padding_val):
             if self.training:
@@ -468,9 +522,10 @@ class PtTransformer(nn.Module):
 
         # Process video features
         batched_feats, batched_masks = process_feats(feats, feats_lens, max_len, padding_val)
+        batched_a_feats, batched_a_masks = process_feats(audio_feats, audio_feats_lens, max_len, padding_val)
         # Process audio features
 
-        return batched_feats, batched_masks
+        return batched_feats, batched_masks, batched_a_feats, batched_a_masks
 
     @torch.no_grad()
     def label_points(self, points, gt_segments, gt_labels):

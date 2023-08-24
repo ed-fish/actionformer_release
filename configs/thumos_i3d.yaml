@@ -3,7 +3,7 @@ train_split: ['validation']
 val_split: ['test']
 dataset: {
   json_file: ./data/thumos/annotations/thumos14.json,
-  feat_folder: /mnt/welles/scratch/datasets/thumos/i3d/thumos_i3d/,
+  feat_folder: /mnt/welles/scratch/datasets/thumos/i3d/,
   file_prefix: ~,
   file_ext: .npy,
   num_classes: 20,
@@ -34,6 +34,7 @@ train_cfg: {
   cls_prior_prob: 0.01,
   center_sample: radius,
   center_sample_radius: 1.5,
+  use_audio: False,
 }
 test_cfg: {
   voting_thresh: 0.7,

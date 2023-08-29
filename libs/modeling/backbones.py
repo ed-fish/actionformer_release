@@ -87,6 +87,9 @@ class ConvTransformerBackbone(nn.Module):
                     use_rel_pe=self.use_rel_pe
                 )
             )
+            
+        self.cross_att = nn.ModuleList()
+        
 
         # main branch using transformer with pooling
         self.branch = nn.ModuleList()
@@ -124,6 +127,7 @@ class ConvTransformerBackbone(nn.Module):
                     for proj, s in zip(self.proj, x.split(self.n_in, dim=1))
                 ], dim=1
             )
+            
 
         # embedding network
         for idx in range(len(self.embd)):
@@ -150,6 +154,8 @@ class ConvTransformerBackbone(nn.Module):
         # stem transformer
         for idx in range(len(self.stem)):
             x, mask = self.stem[idx](x, mask)
+            
+        # x = (2, 512, 2304)
 
         # prep for outputs
         out_feats = (x, )

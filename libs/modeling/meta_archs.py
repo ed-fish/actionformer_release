@@ -159,7 +159,32 @@ class PtTransformerRegHead(nn.Module):
 
         # fpn_masks remains the same
         return out_offsets
-
+    
+class AudioEncoder(nn.Module):
+    def __init__(self, in_channels=1, hidden_dim=512, num_layers=7):
+        super(AudioEncoder, self).__init__()
+        
+        self.convs = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        self.activations = nn.ModuleList()
+        
+        for i in range(num_layers):
+            dilation = 2 ** i
+            padding = int((10 - 1) * dilation / 2)
+            
+            in_dim = in_channels if i == 0 else hidden_dim
+            out_dim = hidden_dim
+            
+            self.convs.append(nn.Conv1d(in_dim, out_dim, kernel_size=10, stride=5, dilation=dilation, padding=padding))
+            self.norms.append(LayerNorm(out_dim))
+            self.activations.append(nn.GELU())
+        
+    def forward(self, x):
+        for conv, norm, activation in zip(self.convs, self.norms, self.activations):
+            x = conv(x)
+            x = activation(x)
+            x = norm(x)
+        return x
 
 @register_meta_arch("LocPointTransformer")
 class PtTransformer(nn.Module):
@@ -232,6 +257,8 @@ class PtTransformer(nn.Module):
         self.train_label_smoothing = train_cfg['label_smoothing']
         self.use_audio = train_cfg['use_audio']
         self.audio_fusion_stage = train_cfg['audio_fusion_stage']
+        self.validate_step = False
+        self.audio_encoder = AudioEncoder()
 
         # test time config
         self.test_pre_nms_thresh = test_cfg['pre_nms_thresh']
@@ -377,21 +404,32 @@ class PtTransformer(nn.Module):
             batched_inputs, batched_masks, batched_a_inputs, batched_a_masks = self.preprocessing_audio(video_list)
         else: 
             batched_inputs, batched_masks = self.preprocessing(video_list)
-
-
+            
         # forward the network (backbone -> neck -> heads)
         feats, masks = self.backbone(batched_inputs, batched_masks)
-        
+         
         if self.use_audio:
-            a_feats, a_masks = self.audio_backbone(batched_a_inputs, batched_a_masks)
             combined_feats = []
             if self.audio_fusion_stage == "backbone":
+                
+                a_feats, a_masks = self.audio_backbone(batched_a_inputs, batched_a_masks)
                 for t1, t2 in zip(feats, a_feats):
                     if t1.shape != t2.shape:
-                        breakpoint()
                         raise ValueError("Tensors must be same shape")
                     combined_feats.append(t1 + t2)
-            feats = tuple(combined_feats)
+                feats = tuple(combined_feats)
+            elif self.audio_fusion_stage == "regression": 
+                a_feats, a_masks = self.audio_backbone(batched_a_inputs, batched_a_masks)
+                fpn_audio_feats, fpn_audio_masks = self.neck(a_feats, a_masks)
+            else:
+                B, S, F = batched_a_inputs.size()
+                batched_a_inputs = batched_a_inputs.view(B * S, 1, -1)
+                batched_a_inputs = self.audio_encoder(batched_a_inputs)
+                batched_a_feats = batched_a_inputs.view(B, S, -1).permute(0, 2, 1)
+                breakpoint()
+        
+            
+        # just use audio for reg head here?? 
                     
             
         fpn_feats, fpn_masks = self.neck(feats, masks)
@@ -405,6 +443,15 @@ class PtTransformer(nn.Module):
         # out_cls: List[B, #cls + 1, T_i]
         out_cls_logits = self.cls_head(fpn_feats, fpn_masks)
         # out_offset: List[B, 2, T_i]
+        
+        if self.audio_fusion_stage == "regression":  
+            combined_feats = []
+            for t1, t2 in zip(fpn_feats, fpn_audio_feats):
+                if t1.shape != t2.shape:
+                    t2 = t2[:,:,:t1.shape[-1]]
+                combined_feats.append(t1 + t2)
+            fpn_feats = tuple(combined_feats)
+        
         out_offsets = self.reg_head(fpn_feats, fpn_masks)
 
         # permute the outputs
@@ -491,12 +538,14 @@ class PtTransformer(nn.Module):
         """
         feats = [x['feats'] for x in video_list]
         audio_feats = [x['audio_feats'] for x in video_list]
+        
 
         feats_lens = torch.as_tensor([feat.shape[-1] for feat in feats])
         audio_feats_lens = torch.as_tensor([audio_feat.shape[-1] for audio_feat in audio_feats] )
 
         max_len = feats_lens.max(0).values.item()
         max_audio_len = audio_feats_lens.max(0).values.item()
+        
 
         def process_feats(feats, feats_lens, max_len, padding_val):
             if self.training:
@@ -519,10 +568,12 @@ class PtTransformer(nn.Module):
             batched_masks = torch.arange(max_len)[None, :] < feats_lens[:, None]
 
             return batched_inputs.to(self.device), batched_masks.unsqueeze(1).to(self.device)
+        
 
         # Process video features
         batched_feats, batched_masks = process_feats(feats, feats_lens, max_len, padding_val)
-        batched_a_feats, batched_a_masks = process_feats(audio_feats, audio_feats_lens, max_len, padding_val)
+        batched_a_feats, batched_a_masks = process_feats(audio_feats, audio_feats_lens, max_audio_len, padding_val)
+        
         # Process audio features
 
         return batched_feats, batched_masks, batched_a_feats, batched_a_masks

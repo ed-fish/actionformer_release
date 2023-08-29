@@ -60,7 +60,7 @@ def truncate_feats(
             )
             # # corner case
             if feat_len == max_seq_len:
-                return data_dict
+                return data_dict, 0, feat_len
 
     # otherwise, deep copy the dict
     data_dict = copy.deepcopy(data_dict)
@@ -109,5 +109,5 @@ def truncate_feats(
     # labels: N
     data_dict['labels'] = data_dict['labels'][seg_idx].clone()
 
-    return data_dict
+    return data_dict, st, ed
 

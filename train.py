@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from libs.core import load_config
 from libs.datasets import make_dataset, make_data_loader
 from libs.modeling import make_meta_arch
-from libs.utils import (train_one_epoch, validate_step, ANETdetection,
+from libs.utils import (train_one_epoch, valid_one_epoch, ANETdetection,
                         save_checkpoint, make_optimizer, make_scheduler,
                         fix_random_seed, ModelEma)
 
@@ -128,6 +128,8 @@ def main(args):
         'early_stop_epochs',
         cfg['opt']['epochs'] + cfg['opt']['warmup_epochs']
     )
+    
+    mAP = 0
     for epoch in range(args.start_epoch, max_epochs):
         # train for one epoch
         train_one_epoch(
@@ -143,35 +145,45 @@ def main(args):
         )
         
         
-        validate_step(
-            val_loader,
-            model,
-            epoch,
-            tb_writer=tb_writer,
-            print_freq=args.print_freq
+        val_db_vars = val_dataset.get_attributes()
+        det_eval = ANETdetection(
+            val_dataset.json_file,
+            val_dataset.split[0],
+            tiou_thresholds = val_db_vars['tiou_thresholds']
         )
         
+        if epoch > 0:
         
-
-        # save ckpt once in a while
-        if (
-            ((epoch + 1) == max_epochs) or
-            ((args.ckpt_freq > 0) and ((epoch + 1) % args.ckpt_freq == 0))
-        ):
-            save_states = {
-                'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
-                'scheduler': scheduler.state_dict(),
-                'optimizer': optimizer.state_dict(),
-            }
-
-            save_states['state_dict_ema'] = model_ema.module.state_dict()
-            save_checkpoint(
-                save_states,
-                False,
-                file_folder=ckpt_folder,
-                file_name='epoch_{:03d}.pth.tar'.format(epoch + 1)
+        
+            result = valid_one_epoch(
+                val_loader,
+                model,
+                epoch,
+                evaluator=det_eval,
+                tb_writer=tb_writer,
+                print_freq=args.print_freq
             )
+            
+
+            # save ckpt once in a while
+            if (result > mAP
+
+            ):
+                save_states = {
+                    'epoch': epoch + 1,
+                    'state_dict': model.state_dict(),
+                    'scheduler': scheduler.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                }
+
+                save_states['state_dict_ema'] = model_ema.module.state_dict()
+                save_checkpoint(
+                    save_states,
+                    False,
+                    file_folder=ckpt_folder,
+                    file_name='epoch_{:03d}.pth.tar'.format(epoch + 1)
+                )
+                mAP = result
 
     # wrap up
     tb_writer.close()

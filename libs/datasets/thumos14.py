@@ -200,7 +200,8 @@ class THUMOS14AudioDataset(Dataset):
         is_training,     # if in training mode
         split,           # split, a tuple/list allowing concat of subsets
         feat_folder,     # folder for features
-        audio_folder,
+        audio_feats_folder,
+        raw_audio_folder,
         json_file,       # json file for annotations
         feat_stride,     # temporal stride of the feats
         num_frames,      # number of frames for each feat
@@ -216,16 +217,21 @@ class THUMOS14AudioDataset(Dataset):
         force_upsampling, # force to upsample to max_seq_len
         audio_dataset_fuse, # If fusion of audio data or not
         use_audio,
+        raw_audio,
         
     ):
         # file path
-        print(feat_folder)
         assert os.path.exists(feat_folder) and os.path.exists(json_file)
-        assert os.path.exists(audio_folder)
+        if raw_audio:
+            print("using raw audio at ", raw_audio_folder)
+            assert os.path.exists(raw_audio_folder)
+        else: 
+            assert os.path.exists(audio_feats_folder)
         assert isinstance(split, tuple) or isinstance(split, list)
         assert crop_ratio == None or len(crop_ratio) == 2
         self.feat_folder = feat_folder
-        self.audio_folder = audio_folder
+        self.audio_feats_folder = audio_feats_folder
+        self.raw_audio_folder = raw_audio_folder
         if file_prefix is not None:
             self.file_prefix = file_prefix
         else:
@@ -249,6 +255,8 @@ class THUMOS14AudioDataset(Dataset):
         self.label_dict = None
         self.crop_ratio = crop_ratio
         self.audio_dataset_fuse = audio_dataset_fuse
+        self.raw_audio = raw_audio
+        self.raw_audio_wav = False
 
         # load database and select the subset
         dict_db, label_dict = self._load_json_db(self.json_file)
@@ -341,11 +349,34 @@ class THUMOS14AudioDataset(Dataset):
         feats = np.load(filename).astype(np.float32)
 
         # Load audio features
-        audio_file = os.path.join(self.audio_folder, self.file_prefix + video_item['id'] + self.file_ext)
-        audio_feats = np.load(audio_file).astype(np.float32) / 255
+        if self.raw_audio_wav:    
+            audio_file = os.path.join(self.raw_audio_folder, self.file_prefix + video_item['id'] + ".wav")
+            raw_audio_data, sample_rate = torchaudio.load(audio_file, normalize=True)
+            raw_audio_data = raw_audio_data.mean(dim=0, keepdim=True)
+            resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
+            waveform = resampler(raw_audio_data)
+            waveform = (waveform - waveform.mean()) / waveform.std()
+
+            # Cut into 1-second (16000 samples) chunks
+            num_segments = waveform.shape[1] // 2133
+            segments = []
+            for i in range(num_segments):
+                segment = waveform[:, i*2133:(i+1)*2133]
+                segments.append(segment)
+            raw_audio_data = torch.stack(segments).squeeze().transpose(0, 1)
+        elif self.raw_audio: 
+            audio_file = os.path.join(self.raw_audio_folder, self.file_prefix + video_item['id'] + self.file_ext) 
+            audio_feats = np.load(audio_file).astype(np.float32) / 255
+            
+        else:
+            audio_file = os.path.join(self.audio_folder, self.file_prefix + video_item['id'] + self.file_ext) 
+            audio_feats = np.load(audio_file).astype(np.float32) / 255
+        
 
         # Determine the repetition factor and the exact number of temporal features
         if self.audio_dataset_fuse == "concat":
+            if self.raw_audio:
+                raise ValueError("cannot use concat with raw_audio features")
         
             video_to_audio_ratio = feats.shape[0] / audio_feats.shape[0]
             repeat_factor = int(np.floor(video_to_audio_ratio))
@@ -373,7 +404,13 @@ class THUMOS14AudioDataset(Dataset):
 
         feats = torch.from_numpy(feats)
         feats = feats.transpose(1, 0)
+        
+        audio_feats = torch.from_numpy(audio_feats)
         audio_feats = audio_feats.transpose(1, 0)
+        
+        
+        if not self.raw_audio:
+            audio_feats = audio_feats.transpose(1, 0)
         
         if self.audio_dataset_fuse == "concat": 
             feats = torch.cat((feats, repeated_audio_feats), dim=0).float()
@@ -401,10 +438,14 @@ class THUMOS14AudioDataset(Dataset):
 
         # Truncate the features during training
         if self.is_training and (segments is not None):
-            data_dict = truncate_feats(data_dict, self.max_seq_len, self.trunc_thresh, feat_offset, self.crop_ratio)
-            trunc_start = data_dict['segments'][0, 0] + feat_offset
-            trunc_end = data_dict['segments'][-1, 1] - feat_offset
-        if self.audio_dataset_fuse != "concat":
-            data_dict["audio_feats"] = torch.from_numpy(audio_feats)
+            data_dict, st, ed = truncate_feats(data_dict, self.max_seq_len, self.trunc_thresh, feat_offset, self.crop_ratio)
+            if self.audio_dataset_fuse != "concat":
+                if self.raw_audio and self.is_training:
+                    truncated_audio = audio_feats[:, st:ed]
+                    data_dict["audio_feats"] = truncated_audio
+        else:
+            data_dict["audio_feats"] = audio_feats
+            
+            
 
         return data_dict

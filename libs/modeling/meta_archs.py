@@ -89,7 +89,8 @@ class PtTransformerClsHead(nn.Module):
 
         # fpn_masks remains the same
         return out_logits
-
+    
+from torch.nn import MultiheadAttention
 
 class PtTransformerRegHead(nn.Module):
     """
@@ -111,6 +112,7 @@ class PtTransformerRegHead(nn.Module):
         self.act = act_layer()
 
         # build the conv head
+        
         self.head = nn.ModuleList()
         self.norm = nn.ModuleList()
         for idx in range(num_layers-1):
@@ -159,6 +161,48 @@ class PtTransformerRegHead(nn.Module):
 
         # fpn_masks remains the same
         return out_offsets
+    
+    
+class ModifiedPtTransformerRegHead(PtTransformerRegHead):
+    def __init__(self, input_dim, feat_dim, fpn_levels, num_layers=3,
+                 kernel_size=3, act_layer=nn.ReLU, with_ln=False, num_heads=8):
+        super().__init__(input_dim, feat_dim, fpn_levels, num_layers, kernel_size, act_layer, with_ln)
+        
+        
+        self.cross_attention_list = nn.ModuleList()
+        for _ in range(fpn_levels):
+            self.cross_attention_list.append(MultiheadAttention(512, num_heads))
+        
+        # Cross-Attention layer
+
+    def forward(self, fpn_feats_visual, fpn_feats_audio, fpn_masks_visual, fpn_masks_audio):
+        out_offsets = tuple()
+        for l, (cur_feat_visual, cur_feat_audio, cur_mask_visual, cur_mask_audio) in enumerate(zip(fpn_feats_visual, fpn_feats_audio, fpn_masks_visual, fpn_masks_audio)):
+            cur_out_visual = cur_feat_visual
+            cur_out_audio = cur_feat_audio
+            
+            # Apply 1D Conv layers
+            for idx in range(len(self.head)):
+                cur_out_visual, _ = self.head[idx](cur_out_visual, cur_mask_visual)
+                cur_out_audio, _ = self.head[idx](cur_out_audio, cur_mask_audio)
+                cur_out_visual = self.act(self.norm[idx](cur_out_visual))
+                cur_out_audio = self.act(self.norm[idx](cur_out_audio))
+
+            # Apply cross-attention
+            cur_out_visual = cur_out_visual.permute(2, 0, 1)
+            cur_out_audio = cur_out_audio.permute(2, 0, 1)
+            cur_out_visual, _ = self.cross_attention_list[l](cur_out_visual, cur_out_audio, cur_out_audio)
+            cur_out_visual = cur_out_visual.permute(1, 2, 0)
+            
+            # Offset prediction
+            cur_offsets, _ = self.offset_head(cur_out_visual, cur_mask_visual)
+            out_offsets += (F.relu(self.scale[l](cur_offsets)), )
+
+        return out_offsets
+    
+    
+
+
     
 class AudioEncoder(nn.Module):
     def __init__(self, in_channels=1, hidden_dim=512, num_layers=7):
@@ -258,7 +302,7 @@ class PtTransformer(nn.Module):
         self.use_audio = train_cfg['use_audio']
         self.audio_fusion_stage = train_cfg['audio_fusion_stage']
         self.validate_step = False
-        self.audio_encoder = AudioEncoder()
+        # self.audio_encoder = AudioEncoder()
 
         # test time config
         self.test_pre_nms_thresh = test_cfg['pre_nms_thresh']
@@ -360,6 +404,18 @@ class PtTransformer(nn.Module):
                 'with_ln' : fpn_with_ln
             }
         )
+        
+        
+        self.a_neck = make_neck(
+            fpn_type,
+            **{
+                'in_channels' : [embd_dim] * (backbone_arch[-1] + 1),
+                'out_channel' : fpn_dim,
+                'scale_factor' : scale_factor,
+                'start_level' : fpn_start_level,
+                'with_ln' : fpn_with_ln
+            }
+        )
 
         # location generator: points
         self.point_generator = make_generator(
@@ -380,12 +436,20 @@ class PtTransformer(nn.Module):
             num_layers=head_num_layers,
             empty_cls=train_cfg['head_empty_cls']
         )
-        self.reg_head = PtTransformerRegHead(
-            fpn_dim, head_dim, len(self.fpn_strides),
-            kernel_size=head_kernel_size,
-            num_layers=head_num_layers,
-            with_ln=head_with_ln
-        )
+        if self.audio_fusion_stage == "regression":
+            self.reg_head = ModifiedPtTransformerRegHead(
+                fpn_dim, head_dim, len(self.fpn_strides),
+                kernel_size=head_kernel_size,
+                num_layers=head_num_layers,
+                with_ln=head_with_ln
+                )
+        else:
+            self.reg_head = PtTransformerRegHead(
+                fpn_dim, head_dim, len(self.fpn_strides),
+                kernel_size=head_kernel_size,
+                num_layers=head_num_layers,
+                with_ln=head_with_ln
+            )
 
         # maintain an EMA of #foreground to stabilize the loss normalizer
         # useful for small mini-batch training
@@ -420,39 +484,48 @@ class PtTransformer(nn.Module):
                 feats = tuple(combined_feats)
             elif self.audio_fusion_stage == "regression": 
                 a_feats, a_masks = self.audio_backbone(batched_a_inputs, batched_a_masks)
-                fpn_audio_feats, fpn_audio_masks = self.neck(a_feats, a_masks)
+                fpn_audio_feats, fpn_audio_masks = self.a_neck(a_feats, a_masks)
             else:
                 B, S, F = batched_a_inputs.size()
-                batched_a_inputs = batched_a_inputs.view(B * S, 1, -1)
+                batched_a_inputs = batched_a_inputs.view(1, 1, -1)
                 batched_a_inputs = self.audio_encoder(batched_a_inputs)
-                batched_a_feats = batched_a_inputs.view(B, S, -1).permute(0, 2, 1)
-                breakpoint()
+                # breakpoint()
+                # batched_a_feats = batched_a_inputs.view(B, S, -1).permute(0, 2, 1)
+                # breakpoint()
         
             
         # just use audio for reg head here?? 
                     
             
         fpn_feats, fpn_masks = self.neck(feats, masks)
+        
 
         # compute the point coordinate along the FPN
         # this is used for computing the GT or decode the final results
         # points: List[T x 4] with length = # fpn levels
         # (shared across all samples in the mini-batch)
         points = self.point_generator(fpn_feats)
+        
 
         # out_cls: List[B, #cls + 1, T_i]
         out_cls_logits = self.cls_head(fpn_feats, fpn_masks)
         # out_offset: List[B, 2, T_i]
         
-        if self.audio_fusion_stage == "regression":  
-            combined_feats = []
-            for t1, t2 in zip(fpn_feats, fpn_audio_feats):
-                if t1.shape != t2.shape:
-                    t2 = t2[:,:,:t1.shape[-1]]
-                combined_feats.append(t1 + t2)
-            fpn_feats = tuple(combined_feats)
+        # breakpoint()
         
-        out_offsets = self.reg_head(fpn_feats, fpn_masks)
+        # if self.audio_fusion_stage == "regression":  
+        #     combined_feats = []
+        #     for t1, t2 in zip(fpn_feats, fpn_audio_feats):
+        #         if t1.shape != t2.shape:
+        #             t2 = t2[:,:,:t1.shape[-1]]
+        #         combined_feats.append(t1 + t2)
+        #     fpn_feats = tuple(combined_feats)
+        
+        
+        if self.audio_fusion_stage == "regression":
+            out_offsets = self.reg_head(fpn_feats, fpn_audio_feats, fpn_masks, fpn_audio_masks)
+        else: 
+            out_offsets = self.reg_head(fpn_feats, fpn_masks)
 
         # permute the outputs
         # out_cls: F List[B, #cls, T_i] -> F List[B, T_i, #cls]

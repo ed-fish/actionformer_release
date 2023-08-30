@@ -406,7 +406,9 @@ class THUMOS14AudioDataset(Dataset):
         feats = feats.transpose(1, 0)
         
         audio_feats = torch.from_numpy(audio_feats)
+        audio_feats = F.normalize(audio_feats, dim=-1)
         audio_feats = audio_feats.transpose(1, 0)
+    
         
         
         if not self.raw_audio:
@@ -446,6 +448,5 @@ class THUMOS14AudioDataset(Dataset):
         else:
             data_dict["audio_feats"] = audio_feats
             
-            
-
+        
         return data_dict

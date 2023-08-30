@@ -27,12 +27,12 @@ model: {
   n_mha_win_size: 19,
 }
 opt: {
-  learning_rate: 0.00005,
-  epochs: 45,
+  learning_rate: 0.0001,
+  epochs: 35,
   weight_decay: 0.05,
 }
 loader: {
-  batch_size: 8,
+  batch_size: 1,
 }
 train_cfg: {
   init_loss_norm: 100,

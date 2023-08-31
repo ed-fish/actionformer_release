@@ -5,7 +5,7 @@ dataset: {
   json_file: ./data/thumos/annotations/thumos14.json,
   feat_folder: /mnt/welles/scratch/datasets/thumos/i3d/,
   audio_feats_folder: /mnt/welles/scratch/datasets/thumos/audio_features/,
-  raw_audio_folder: /mnt/welles/scratch/datasets/thumos/audio_np,
+  raw_audio_folder: /mnt/welles/scratch/datasets/thumos/log_mel_audio_np,
   file_prefix: ~,
   file_ext: .npy,
   num_classes: 20,
@@ -28,11 +28,11 @@ model: {
 }
 opt: {
   learning_rate: 0.0001,
-  epochs: 35,
+  epochs: 30,
   weight_decay: 0.05,
 }
 loader: {
-  batch_size: 1,
+  batch_size: 2,
 }
 train_cfg: {
   init_loss_norm: 100,
@@ -41,7 +41,7 @@ train_cfg: {
   center_sample: radius,
   center_sample_radius: 1.5,
   use_audio: True,
-  audio_input_dim: 2132,
+  audio_input_dim: 128,
   audio_fusion_stage: regression # backbone, regression, concat
 }
 test_cfg: {

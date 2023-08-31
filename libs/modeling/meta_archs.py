@@ -10,7 +10,6 @@ from .losses import ctr_diou_loss_1d, sigmoid_focal_loss
 
 from ..utils import batched_nms
 
-import matplotlib.pyplot as plt
 
 class PtTransformerClsHead(nn.Module):
     """
@@ -162,6 +161,72 @@ class PtTransformerRegHead(nn.Module):
         # fpn_masks remains the same
         return out_offsets
     
+class ModifiedPtTransformerClsHead(PtTransformerClsHead):
+    
+    def __init__(
+        self,
+        input_dim,
+        feat_dim,
+        fpn_levels,
+        num_classes,
+        prior_prob=0.01,
+        num_layers=3,
+        kernel_size=3,
+        act_layer=nn.ReLU,
+        with_ln=False,
+        empty_cls = [],
+        num_heads=8
+    ):
+        super().__init__(input_dim, feat_dim, num_classes, kernel_size=kernel_size, act_layer=act_layer, with_ln=with_ln)
+         
+        self.cross_attention_list = nn.ModuleList()
+        for _ in range(fpn_levels):
+            self.cross_attention_list.append(MultiheadAttention(512, num_heads))
+            
+        self.a_head = nn.ModuleList()
+        for idx in range(num_layers-1):
+            if idx == 0:
+                in_dim = input_dim
+                out_dim = feat_dim
+            else:
+                in_dim = feat_dim
+                out_dim = feat_dim
+            self.a_head.append(
+                MaskedConv1D(
+                    in_dim, out_dim, kernel_size,
+                    stride=1,
+                    padding=kernel_size//2,
+                    bias=(not with_ln)
+                )
+            )
+        
+        # Cross-Attention layer
+
+    def forward(self, fpn_feats_visual, fpn_feats_audio, fpn_masks_visual, fpn_masks_audio):
+        out_logits = tuple()
+        for l, (cur_feat_visual, cur_feat_audio, cur_mask_visual, cur_mask_audio) in enumerate(zip(fpn_feats_visual, fpn_feats_audio, fpn_masks_visual, fpn_masks_audio)):
+            cur_out_visual = cur_feat_visual
+            cur_out_audio = cur_feat_audio
+            
+            # Apply 1D Conv layers
+            for idx in range(len(self.head)):
+                cur_out_visual, _ = self.head[idx](cur_out_visual, cur_mask_visual)
+                cur_out_audio, _ = self.a_head[idx](cur_out_audio, cur_mask_audio)
+                cur_out_visual = self.act(self.norm[idx](cur_out_visual))
+                cur_out_audio = self.act(self.norm[idx](cur_out_audio))
+
+            # Apply cross-attention
+            cur_out_visual = cur_out_visual.permute(2, 0, 1)
+            cur_out_audio = cur_out_audio.permute(2, 0, 1)
+            cur_out_visual, _ = self.cross_attention_list[l](cur_out_visual, cur_out_audio, cur_out_audio)
+            cur_out_visual = cur_out_visual.permute(1, 2, 0)
+            
+            # Offset prediction
+            cur_logits, _ = self.cls_head(cur_out_visual, cur_mask_visual)
+            out_logits += (cur_logits, )
+
+        return out_logits
+    
     
 class ModifiedPtTransformerRegHead(PtTransformerRegHead):
     def __init__(self, input_dim, feat_dim, fpn_levels, num_layers=3,
@@ -172,6 +237,23 @@ class ModifiedPtTransformerRegHead(PtTransformerRegHead):
         self.cross_attention_list = nn.ModuleList()
         for _ in range(fpn_levels):
             self.cross_attention_list.append(MultiheadAttention(512, num_heads))
+            
+        self.a_head = nn.ModuleList()
+        for idx in range(num_layers-1):
+            if idx == 0:
+                in_dim = input_dim
+                out_dim = feat_dim
+            else:
+                in_dim = feat_dim
+                out_dim = feat_dim
+            self.a_head.append(
+                MaskedConv1D(
+                    in_dim, out_dim, kernel_size,
+                    stride=1,
+                    padding=kernel_size//2,
+                    bias=(not with_ln)
+                )
+            )
         
         # Cross-Attention layer
 
@@ -184,7 +266,7 @@ class ModifiedPtTransformerRegHead(PtTransformerRegHead):
             # Apply 1D Conv layers
             for idx in range(len(self.head)):
                 cur_out_visual, _ = self.head[idx](cur_out_visual, cur_mask_visual)
-                cur_out_audio, _ = self.head[idx](cur_out_audio, cur_mask_audio)
+                cur_out_audio, _ = self.a_head[idx](cur_out_audio, cur_mask_audio)
                 cur_out_visual = self.act(self.norm[idx](cur_out_visual))
                 cur_out_audio = self.act(self.norm[idx](cur_out_audio))
 
@@ -428,15 +510,26 @@ class PtTransformer(nn.Module):
         )
 
         # classfication and regerssion heads
-        self.cls_head = PtTransformerClsHead(
-            fpn_dim, head_dim, self.num_classes,
-            kernel_size=head_kernel_size,
-            prior_prob=self.train_cls_prior_prob,
-            with_ln=head_with_ln,
-            num_layers=head_num_layers,
-            empty_cls=train_cfg['head_empty_cls']
-        )
-        if self.audio_fusion_stage == "regression":
+        
+        if self.audio_fusion_stage in ["cross_att_cls", "cross_att_both"]:
+            self.cls_head = ModifiedPtTransformerClsHead(
+                fpn_dim, head_dim, len(self.fpn_strides), self.num_classes,
+                kernel_size=head_kernel_size,
+                prior_prob=self.train_cls_prior_prob,
+                with_ln=head_with_ln,
+                num_layers=head_num_layers,
+                empty_cls=train_cfg['head_empty_cls']
+            )
+        else: 
+            self.cls_head = PtTransformerClsHead(
+                fpn_dim, head_dim, self.num_classes,
+                kernel_size=head_kernel_size,
+                prior_prob=self.train_cls_prior_prob,
+                with_ln=head_with_ln,
+                num_layers=head_num_layers,
+                empty_cls=train_cfg['head_empty_cls']
+            )
+        if self.audio_fusion_stage in ["cross_att_regression", "cross_att_both"]:
             self.reg_head = ModifiedPtTransformerRegHead(
                 fpn_dim, head_dim, len(self.fpn_strides),
                 kernel_size=head_kernel_size,
@@ -469,6 +562,7 @@ class PtTransformer(nn.Module):
         else: 
             batched_inputs, batched_masks = self.preprocessing(video_list)
             
+            
         # forward the network (backbone -> neck -> heads)
         feats, masks = self.backbone(batched_inputs, batched_masks)
          
@@ -499,7 +593,6 @@ class PtTransformer(nn.Module):
             
         fpn_feats, fpn_masks = self.neck(feats, masks)
         
-
         # compute the point coordinate along the FPN
         # this is used for computing the GT or decode the final results
         # points: List[T x 4] with length = # fpn levels
@@ -508,7 +601,8 @@ class PtTransformer(nn.Module):
         
 
         # out_cls: List[B, #cls + 1, T_i]
-        out_cls_logits = self.cls_head(fpn_feats, fpn_masks)
+        if self.audio_fusion_stage == "regression":
+            out_cls_logits = self.cls_head(fpn_feats, fpn_audio_feats, fpn_masks, fpn_audio_masks)
         # out_offset: List[B, 2, T_i]
         
         # breakpoint()

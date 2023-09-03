@@ -151,7 +151,22 @@ def main(args):
             tiou_thresholds = val_db_vars['tiou_thresholds']
         )
         
-        if epoch > 0:
+        if epoch > 20:
+            
+            save_states = {
+                'epoch': epoch + 1,
+                'state_dict': model.state_dict(),
+                'scheduler': scheduler.state_dict(),
+                'optimizer': optimizer.state_dict(),
+            }
+
+            save_states['state_dict_ema'] = model_ema.module.state_dict()
+            save_checkpoint(
+                save_states,
+                False,
+                file_folder=ckpt_folder,
+                file_name='epoch_{:03d}.pth.tar'.format(epoch + 1)
+            )
         
         
             result = valid_one_epoch(
@@ -163,26 +178,11 @@ def main(args):
                 print_freq=args.print_freq
             )
             
+            print(result)
+            
 
             # save ckpt once in a while
-            if (result > mAP
 
-            ):
-                save_states = {
-                    'epoch': epoch + 1,
-                    'state_dict': model.state_dict(),
-                    'scheduler': scheduler.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                }
-
-                save_states['state_dict_ema'] = model_ema.module.state_dict()
-                save_checkpoint(
-                    save_states,
-                    False,
-                    file_folder=ckpt_folder,
-                    file_name='epoch_{:03d}.pth.tar'.format(epoch + 1)
-                )
-                mAP = result
 
     # wrap up
     tb_writer.close()

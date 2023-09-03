@@ -4,8 +4,7 @@ val_split: ['test']
 dataset: {
   json_file: ./data/thumos/annotations/thumos14.json,
   feat_folder: /mnt/welles/scratch/datasets/thumos/i3d/,
-  audio_feats_folder: /mnt/welles/scratch/datasets/thumos/audio_features/,
-  raw_audio_folder: /mnt/welles/scratch/datasets/thumos/log_mel_audio_np,
+  audio_folder: /mnt/welles/scratch/datasets/thumos/log_mel_audio_np,
   file_prefix: ~,
   file_ext: .npy,
   num_classes: 20,
@@ -15,16 +14,16 @@ dataset: {
   # serve as data augmentation
   trunc_thresh: 0.5,
   crop_ratio: [0.9, 1.0],
-  max_seq_len: 2304,
+  max_seq_len: 4000,
   use_audio: True,
-  audio_dataset_fuse: None,
-  raw_audio: True
+  audio_format: mel_spec # raw, vgg, mel_spec
 }
 
 model: {
   fpn_type: identity,
   max_buffer_len_factor: 6.0,
-  n_mha_win_size: 19,
+  n_mha_win_size: -1,
+  #use_abs_pe: True,
 }
 opt: {
   learning_rate: 0.0001,
@@ -42,7 +41,7 @@ train_cfg: {
   center_sample_radius: 1.5,
   use_audio: True,
   audio_input_dim: 128,
-  audio_fusion_stage: regression # backbone, regression, concat
+  audio_fusion_stage: "cross_att_both" # backbone, regression, concat
 }
 test_cfg: {
   voting_thresh: 0.7,

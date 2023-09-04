@@ -356,15 +356,19 @@ class THUMOS14AudioDataset(Dataset):
                     segment = waveform[:, i*2133:(i+1)*2133]
                     segments.append(segment)
                 raw_audio_data = torch.stack(segments).squeeze().transpose(0, 1)
-            elif self.audio_format in ["vgg", "mel_spec"]: 
+            elif self.audio_format == "mel_spec": 
                 audio_file = os.path.join(self.audio_folder, self.file_prefix + video_item['id'] + self.file_ext) 
-                audio_feats = np.load(audio_file).astype(np.float32) / 255
-                
+                audio_feats = np.load(audio_file).astype(np.float32)
+                g_mean = np.min(audio_feats)
+                g_std = np.std(audio_feats)
+                audio_feats = (audio_feats - g_mean) / (g_std + 0.00001)
+            elif self.audio_format == "vgg": 
+                audio_file = os.path.join(self.audio_folder, self.file_prefix + video_item['id'] + self.file_ext) 
+                audio_feats = np.load(audio_file).astype(np.float32) 
             else:
                 raise Exception(f"{self.audio_format} not recognized")
-            
-            
-            audio_feats = torch.from_numpy(audio_feats)
+             
+            audio_feats = torch.from_numpy(np.ascontiguousarray(audio_feats)) / 255
             # mean = audio_feats.mean(dim=0, keepdim=True)
             # std = audio_feats.std(dim=0, keepdim=True)
 
@@ -373,14 +377,14 @@ class THUMOS14AudioDataset(Dataset):
             audio_feats = audio_feats.transpose(1, 0)
             
         
-        feats = torch.from_numpy(feats)
+        feats = torch.from_numpy(np.ascontiguousarray(feats))
         feats = feats.transpose(1, 0)
         
-        a_e = audio_feats.shape[-1]
-        v_e = feats.shape[-1]
-        if a_e != v_e:
-            dist = a_e - v_e
-            audio_feats = audio_feats[:,:-dist]
+        # a_e = audio_feats.shape[-1]
+        # v_e = feats.shape[-1]
+        # if a_e != v_e:
+        #     dist = a_e - v_e
+        #     audio_feats = audio_feats[:,:-dist]
 
         # Process segments and labels
         feat_stride = self.feat_stride * self.downsample_rate

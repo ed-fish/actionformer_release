@@ -59,6 +59,17 @@ class PtTransformerClsHead(nn.Module):
                 stride=1, padding=kernel_size//2
             )
         
+        
+        # self.v_offset_head = MaskedConv1D(
+        #         feat_dim, 2, kernel_size,
+        #         stride=1, padding=kernel_size//2
+        #     )
+        
+        self.merge_heads = MaskedConv1D(
+            feat_dim * 2, feat_dim, kernel_size, 
+            stride=1, padding=kernel_size//2
+        )
+        
         self.a_cls_head = MaskedConv1D(feat_dim, num_classes, kernel_size, stride=1, padding=kernel_size//2)
 
         # use prior in model initialization to improve stability
@@ -158,6 +169,11 @@ class PtTransformerRegHead(nn.Module):
                 feat_dim, 2, kernel_size,
                 stride=1, padding=kernel_size//2
             )
+        
+        self.merge_heads = MaskedConv1D(
+            feat_dim * 2, feat_dim, kernel_size, 
+            stride=1, padding=kernel_size//2
+        )
 
     def forward(self, fpn_feats, fpn_masks):
         assert len(fpn_feats) == len(fpn_masks)
@@ -220,6 +236,8 @@ class ModifiedPtTransformerClsHead(PtTransformerClsHead):
                     bias=(not with_ln)
                 )
             )
+            
+        self.mixers = torch.nn.Parameter(torch.full((fpn_levels,), 0.8))
         
         # Cross-Attention layer
 
@@ -235,6 +253,14 @@ class ModifiedPtTransformerClsHead(PtTransformerClsHead):
                 cur_out_audio, _ = self.a_head[idx](cur_out_audio, cur_mask_audio)
                 cur_out_visual = self.act(self.norm[idx](cur_out_visual))
                 cur_out_audio = self.act(self.norm[idx](cur_out_audio))
+                
+            
+            joint_out = torch.cat((cur_out_visual, cur_out_audio), dim=1)   
+            joint_merge, _ = self.merge_heads(joint_out, cur_mask_visual)
+            
+            joint_merge = cur_out_visual + joint_merge
+            
+            joint_out, _ = self.v_offset_head(joint_merge, cur_mask_visual)
 
             # Apply cross-attention
             
@@ -255,9 +281,11 @@ class ModifiedPtTransformerClsHead(PtTransformerClsHead):
             
             
             # Offset prediction
+            alpha = self.mixers[l]
             v_logits, _ = self.cls_head(cur_out_visual, cur_mask_visual) 
             a_logits, _ = self.a_cls_head(cur_out_audio, cur_mask_audio)
-            out_logits += (v_logits + 0.5 * a_logits, )
+            out_logits += (v_logits, )
+            # out_logits += (alpha * v_logits + (1 - alpha) * a_logits, )
 
         return out_logits
     
@@ -296,7 +324,7 @@ class ModifiedPtTransformerRegHead(PtTransformerRegHead):
                     bias=(not with_ln)
                 )
             )
-        self.mixers = torch.nn.Parameter(torch.full((fpn_levels,), 0.9))
+        self.mixers = torch.nn.Parameter(torch.full((fpn_levels,), 0.8))
         
 
         
@@ -316,7 +344,14 @@ class ModifiedPtTransformerRegHead(PtTransformerRegHead):
                 cur_out_audio, _ = self.a_head[idx](cur_out_audio, cur_mask_audio)
                 cur_out_visual = self.act(self.norm[idx](cur_out_visual))
                 cur_out_audio = self.act(self.norm[idx](cur_out_audio))
-
+                
+            joint_out = torch.cat((cur_out_visual, cur_out_audio), dim=1)   
+            joint_merge, _ = self.merge_heads(joint_out, cur_mask_visual)
+            
+            joint_merge = cur_out_visual + joint_merge
+            
+            joint_out, _ = self.v_offset_head(joint_merge, cur_mask_visual)
+                
             # Apply cross-attention
             
             # cur_out_visual = cur_out_visual.permute(2, 0, 1)
@@ -336,14 +371,23 @@ class ModifiedPtTransformerRegHead(PtTransformerRegHead):
             # cur_out_visual = cur_out_visual.permute(1, 2, 0)
             
             # Offset prediction
-            v_offsets, _ = self.v_offset_head(cur_out_visual, cur_mask_visual)
-            a_offsets, _ = self.a_offset_head(cur_out_audio, cur_mask_audio)
-            alpha = self.mixers[l]
+            # breakpoint()
+            
+            # v_offsets, _ = self.v_offset_head(cur_out_visual, cur_mask_visual)
+            # a_offsets, _ = self.a_offset_head(cur_out_audio, cur_mask_audio)
+            
+            # join_offsets = torch.cat((a_offsets, v_offsets), dim=2)
+            # breakpoint()
+            
             
             # cur_offsets, _ = self.offset_head(cur_out_visual, cur_mask_visual)
-            v_offsets = F.relu(self.v_scale[l](v_offsets))
-            a_offsets = F.relu(self.a_scale[l](a_offsets))
-            out_offsets += (alpha * v_offsets + (1 - alpha) * a_offsets, )
+            j_offsets = F.relu(self.v_scale[l](joint_out))
+            # a_offsets = F.relu(self.a_scale[l](a_offsets))
+            # # v_offsets = F.normalize(v_offsets)
+            # # a_offsets = F.normalize(a_offsets)
+            # # out_offsets += (alpha * v_offsets + (1 - alpha) * a_offsets, )
+            # breakpoint()
+            out_offsets += (j_offsets, )
 
         return out_offsets
 
@@ -464,48 +508,48 @@ class PtTransformer(nn.Module):
 
         # we will need a better way to dispatch the params to backbones / necks
         # backbone network: conv + transformer
-        assert backbone_type in ['convTransformer', 'conv']
-        if backbone_type == 'convTransformer':
-            self.backbone = make_backbone(
-                'convTransformer',
-                **{
-                    'n_in' : input_dim,
-                    'n_embd' : embd_dim,
-                    'n_head': n_head,
-                    'n_embd_ks': embd_kernel_size,
-                    'max_len': max_seq_len,
-                    'arch' : backbone_arch,
-                    'mha_win_size': self.mha_win_size,
-                    'scale_factor' : scale_factor,
-                    'with_ln' : embd_with_ln,
-                    'attn_pdrop' : 0.0,
-                    'proj_pdrop' : self.train_dropout,
-                    'path_pdrop' : self.train_droppath,
-                    'use_abs_pe' : use_abs_pe,
-                    'use_rel_pe' : use_rel_pe
-                }
-            )
-        else:
-            self.backbone = make_backbone(
-                'conv',
-                **{
-                    'n_in': input_dim,
-                    'n_embd': embd_dim,
-                    'n_embd_ks': embd_kernel_size,
-                    'arch': backbone_arch,
-                    'scale_factor': scale_factor,
-                    'with_ln' : embd_with_ln
-                }
-            )
+        assert backbone_type in ['convTransformer', 'conv', 'convTransformerAudio', 'convTransformerAudioVgg']
+        # if backbone_type == 'convTransformer':
+        self.backbone = make_backbone(
+            'convTransformer',
+            **{
+                'n_in' : input_dim,
+                'n_embd' : embd_dim,
+                'n_head': n_head,
+                'n_embd_ks': embd_kernel_size,
+                'max_len': max_seq_len,
+                'arch' : backbone_arch,
+                'mha_win_size': self.mha_win_size,
+                'scale_factor' : scale_factor,
+                'with_ln' : embd_with_ln,
+                'attn_pdrop' : 0.0,
+                'proj_pdrop' : self.train_dropout,
+                'path_pdrop' : self.train_droppath,
+                'use_abs_pe' : use_abs_pe,
+                'use_rel_pe' : use_rel_pe
+            }
+        )
+        # else:
+        #     self.backbone = make_backbone(
+        #         'conv',
+        #         **{
+        #             'n_in': input_dim,
+        #             'n_embd': embd_dim,
+        #             'n_embd_ks': embd_kernel_size,
+        #             'arch': backbone_arch,
+        #             'scale_factor': scale_factor,
+        #             'with_ln' : embd_with_ln
+        #         }
+        #     )
         
         if self.use_audio:
             
-            if backbone_type == 'convTransformer':
+            if backbone_type == 'convTransformerAudio':
                 self.audio_backbone = make_backbone(
-                    'convTransformer',
+                    'convTransformerAudio',
                     **{
-                        'n_in' : train_cfg["audio_input_dim"],
-                        'n_embd' : embd_dim,
+                        'n_in' : 1,
+                        'n_embd' : 512,
                         'n_head': n_head,
                         'n_embd_ks': embd_kernel_size,
                         'max_len': max_seq_len,
@@ -520,6 +564,28 @@ class PtTransformer(nn.Module):
                         'use_rel_pe' : use_rel_pe
                     }
                 )
+            elif backbone_type == 'convTransformerAudioVgg':
+                
+                self.audio_backbone = make_backbone(
+                    'convTransformerVgg',
+                    **{
+                        'n_in' : 1,
+                        'n_embd' : 512,
+                        'n_head': n_head,
+                        'n_embd_ks': embd_kernel_size,
+                        'max_len': max_seq_len,
+                        'arch' : backbone_arch,
+                        'mha_win_size': self.mha_win_size,
+                        'scale_factor' : scale_factor,
+                        'with_ln' : embd_with_ln,
+                        'attn_pdrop' : 0.0,
+                        'proj_pdrop' : self.train_dropout,
+                        'path_pdrop' : self.train_droppath,
+                        'use_abs_pe' : use_abs_pe,
+                        'use_rel_pe' : use_rel_pe
+                    }
+                )
+                
             else: 
                 self.backbone = make_backbone(
                     'conv',
@@ -623,6 +689,7 @@ class PtTransformer(nn.Module):
             batched_inputs, batched_masks, batched_a_inputs, batched_a_masks = self.preprocessing_audio(video_list)
         else: 
             batched_inputs, batched_masks = self.preprocessing(video_list)
+        
             
             
         # forward the network (backbone -> neck -> heads)
@@ -791,7 +858,10 @@ class PtTransformer(nn.Module):
 
         # Process video features
         batched_feats, batched_masks = process_feats(feats, feats_lens, max_len, padding_val)
-        batched_a_feats, batched_a_masks = process_feats(audio_feats, audio_feats_lens, max_audio_len, padding_val)
+        if self.training:
+            batched_a_feats, batched_a_masks = process_feats(audio_feats, audio_feats_lens, max_audio_len, padding_val)
+        else: 
+            batched_a_feats, batched_a_masks = process_feats(audio_feats, audio_feats_lens, max_len, padding_val)
         
         # Process audio features
 

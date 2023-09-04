@@ -58,6 +58,60 @@ class MaskedConv1D(nn.Module):
         out_conv = out_conv * out_mask.detach()
         out_mask = out_mask.bool()
         return out_conv, out_mask
+    
+class MaskedConv2D(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=(1, 1),
+        padding=(0, 0),
+        dilation=(1, 1),
+        groups=1,
+        bias=True,
+        padding_mode='zeros'
+    ):
+        super().__init__()
+        # Element must be aligned
+        assert (kernel_size[0] % 2 == 1) and (kernel_size[0] // 2 == padding[0])
+        assert (kernel_size[1] % 2 == 1) and (kernel_size[1] // 2 == padding[1])
+        
+        self.stride = (stride, stride)
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size,
+                              stride, padding, dilation, groups, bias, padding_mode)
+        
+        # Zero out the bias term if it exists
+        if bias:
+            torch.nn.init.constant_(self.conv.bias, 0.)
+
+    def forward(self, x, mask):
+        # x: batch size, feature channel, sequence length, frequency bins
+        # mask: batch size, 1, sequence length, frequency bins (bool)
+        # B, C, T, F = x.size()
+        
+        # # Input length must be divisible by stride for both dimensions
+        # assert T % self.stride[0] == 0
+        # assert F % self.stride[1] == 0
+        
+        # Convolution
+        out_conv = self.conv(x)
+        
+        # Compute the mask
+        if self.stride != (1, 1):
+            # Downsample the mask using nearest neighbor
+            out_mask = F.interpolate(
+                mask.to(x.dtype), size=out_conv.size()[2:], mode='nearest'
+            )
+        else:
+            # Masking out the features
+            out_mask = mask.to(x.dtype)
+        
+        # Masking the output, stop grad to mask
+        out_conv = out_conv * out_mask.detach()
+        out_mask = out_mask.bool()
+        
+        return out_conv, out_mask
 
 
 class LayerNorm(nn.Module):
@@ -88,6 +142,8 @@ class LayerNorm(nn.Module):
             self.register_parameter('bias', None)
 
     def forward(self, x):
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
         assert x.dim() == 3
         assert x.shape[1] == self.num_channels
 

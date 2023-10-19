@@ -7,6 +7,8 @@ from torch.nn import functional as F
 from .models import register_meta_arch, make_backbone, make_neck, make_generator
 from .blocks import MaskedConv1D, Scale, LayerNorm
 from .losses import ctr_diou_loss_1d, sigmoid_focal_loss
+from .fusion_layers import SumFusion, ConcatFusion, CrossAttFusion
+from .dependency_block import Dependency_Block
 
 from ..utils import batched_nms
 
@@ -25,17 +27,22 @@ class PtTransformerClsHead(nn.Module):
         kernel_size=3,
         act_layer=nn.ReLU,
         with_ln=False,
-        empty_cls = []
+        empty_cls = [],
+        audio=False,
     ):
         super().__init__()
         self.act = act_layer()
+        
+        self.audio=audio
 
         # build the head
         self.head = nn.ModuleList()
         self.norm = nn.ModuleList()
+        
         for idx in range(num_layers-1):
             if idx == 0:
-                in_dim = input_dim
+                # BIG HEad here
+                in_dim = input_dim * 2
                 out_dim = feat_dim
             else:
                 in_dim = feat_dim
@@ -58,27 +65,12 @@ class PtTransformerClsHead(nn.Module):
                 feat_dim, num_classes, kernel_size,
                 stride=1, padding=kernel_size//2
             )
-        
-        
-        # self.v_offset_head = MaskedConv1D(
-        #         feat_dim, 2, kernel_size,
-        #         stride=1, padding=kernel_size//2
-        #     )
-        
-        self.merge_heads = MaskedConv1D(
-            feat_dim * 2, feat_dim, kernel_size, 
-            stride=1, padding=kernel_size//2
-        )
-        
-        self.a_cls_head = MaskedConv1D(feat_dim, num_classes, kernel_size, stride=1, padding=kernel_size//2)
 
         # use prior in model initialization to improve stability
         # this will overwrite other weight init
         if prior_prob > 0:
             bias_value = -(math.log((1 - prior_prob) / prior_prob))
             torch.nn.init.constant_(self.cls_head.conv.bias, bias_value)
-            
-            torch.nn.init.constant_(self.a_cls_head.conv.bias, bias_value)
 
         # a quick fix to empty categories:
         # the weights assocaited with these categories will remain unchanged
@@ -88,7 +80,6 @@ class PtTransformerClsHead(nn.Module):
             for idx in empty_cls:
                 torch.nn.init.constant_(self.cls_head.conv.bias[idx], bias_value)
                 
-                torch.nn.init.constant_(self.a_cls_head.conv.bias[idx], bias_value)
 
     def forward(self, fpn_feats, fpn_masks):
         assert len(fpn_feats) == len(fpn_masks)
@@ -121,19 +112,24 @@ class PtTransformerRegHead(nn.Module):
         num_layers=3,
         kernel_size=3,
         act_layer=nn.ReLU,
-        with_ln=False
+        with_ln=True,
+        audio=False,
+        
     ):
         super().__init__()
         self.fpn_levels = fpn_levels
         self.act = act_layer()
-
+        with_ln=True
+        self.audio = audio
+            
         # build the conv head
         
         self.head = nn.ModuleList()
         self.norm = nn.ModuleList()
         for idx in range(num_layers-1):
             if idx == 0:
-                in_dim = input_dim
+                # BIG HEAD HERE
+                in_dim = input_dim * 2
                 out_dim = feat_dim
             else:
                 in_dim = feat_dim
@@ -155,26 +151,17 @@ class PtTransformerRegHead(nn.Module):
         for idx in range(fpn_levels):
             self.a_scale.append(Scale())
             
-        self.v_scale = nn.ModuleList()
+        self.scale = nn.ModuleList()
         for idx in range(fpn_levels):
-            self.v_scale.append(Scale())
+            self.scale.append(Scale())
 
-        # segment regression
-        self.a_offset_head = MaskedConv1D(
+        # segment regression 
+        
+        self.offset_head = MaskedConv1D(
                 feat_dim, 2, kernel_size,
                 stride=1, padding=kernel_size//2
             )
         
-        self.v_offset_head = MaskedConv1D(
-                feat_dim, 2, kernel_size,
-                stride=1, padding=kernel_size//2
-            )
-        
-        self.merge_heads = MaskedConv1D(
-            feat_dim * 2, feat_dim, kernel_size, 
-            stride=1, padding=kernel_size//2
-        )
-
     def forward(self, fpn_feats, fpn_masks):
         assert len(fpn_feats) == len(fpn_masks)
         assert len(fpn_feats) == self.fpn_levels
@@ -192,232 +179,6 @@ class PtTransformerRegHead(nn.Module):
         # fpn_masks remains the same
         return out_offsets
     
-class ModifiedPtTransformerClsHead(PtTransformerClsHead):
-    
-    def __init__(
-        self,
-        input_dim,
-        feat_dim,
-        fpn_levels,
-        num_classes,
-        prior_prob=0.01,
-        num_layers=3,
-        kernel_size=3,
-        act_layer=nn.ReLU,
-        with_ln=False,
-        empty_cls = [],
-        num_heads=8
-    ):
-        super().__init__(input_dim, feat_dim, num_classes, kernel_size=kernel_size, act_layer=act_layer, with_ln=with_ln)
-         
-        # self.cross_attention_list = nn.ModuleList()
-        # for _ in range(fpn_levels):
-        #     self.cross_attention_list.append(MultiheadAttention(512, num_heads))
-            
-        # self.fuse_attention_query = nn.Linear(feat_dim, feat_dim)
-        # self.fuse_attention_key_value = nn.Linear(feat_dim * 2, feat_dim)
-        # self.fuse_attention = MultiheadAttention(feat_dim, num_heads)
-        # self.alpha = nn.Parameter(torch.tensor(0.5))
-
-            
-        self.a_head = nn.ModuleList()
-        for idx in range(num_layers-1):
-            if idx == 0:
-                in_dim = input_dim
-                out_dim = feat_dim
-            else:
-                in_dim = feat_dim
-                out_dim = feat_dim
-            self.a_head.append(
-                MaskedConv1D(
-                    in_dim, out_dim, kernel_size,
-                    stride=1,
-                    padding=kernel_size//2,
-                    bias=(not with_ln)
-                )
-            )
-            
-        self.mixers = torch.nn.Parameter(torch.full((fpn_levels,), 0.8))
-        
-        # Cross-Attention layer
-
-    def forward(self, fpn_feats_visual, fpn_feats_audio, fpn_masks_visual, fpn_masks_audio):
-        out_logits = tuple()
-        for l, (cur_feat_visual, cur_feat_audio, cur_mask_visual, cur_mask_audio) in enumerate(zip(fpn_feats_visual, fpn_feats_audio, fpn_masks_visual, fpn_masks_audio)):
-            cur_out_visual = cur_feat_visual
-            cur_out_audio = cur_feat_audio
-            
-            # Apply 1D Conv layers
-            for idx in range(len(self.head)):
-                cur_out_visual, _ = self.head[idx](cur_out_visual, cur_mask_visual)
-                cur_out_audio, _ = self.a_head[idx](cur_out_audio, cur_mask_audio)
-                cur_out_visual = self.act(self.norm[idx](cur_out_visual))
-                cur_out_audio = self.act(self.norm[idx](cur_out_audio))
-                
-            
-            joint_out = torch.cat((cur_out_visual, cur_out_audio), dim=1)   
-            joint_merge, _ = self.merge_heads(joint_out, cur_mask_visual)
-            
-            joint_merge = cur_out_visual + joint_merge
-            
-            joint_out, _ = self.v_offset_head(joint_merge, cur_mask_visual)
-
-            # Apply cross-attention
-            
-            # cur_out_visual = cur_out_visual * cur_mask_visual.unsqueeze(-1)
-            # cur_out_audio = cur_out_audio * cur_mask_audio.unsqueeze(-1)
-            # cur_out_visual = cur_out_visual.permute(2, 0, 1)
-            # cur_out_audio = cur_out_audio.permute(2, 0, 1)
-            # cur_out_audio, _ = self.cross_attention_list[l](cur_out_audio, cur_out_visual, cur_out_visual)
-            # cur_out_visual, _ = self.cross_attention_list[l](cur_out_visual, cur_out_audio, cur_out_audio)
-            # cur_out_visual = cur_out_visual.permute(1, 2, 0)
-            # cur_out_audio = cur_out_audio.permute(1, 2, 0)
-            
-            # fused_query = self.fuse_attention_query(cur_out_visual)
-            # fused_key_value = self.fuse_attention_key_value(torch.cat((cur_out_visual, cur_out_audio), dim=-1))
-            # cur_out_visual, _ = self.fuse_attention(fused_query, fused_key_value, fused_key_value)
-            # cur_out_visual = cur_out_visual * cur_mask_visual.unsqueeze(-1)
-            # cur_out_audio = cur_out_audio * cur_mask_audio.unsqueeze(-1)
-            
-            
-            # Offset prediction
-            alpha = self.mixers[l]
-            v_logits, _ = self.cls_head(cur_out_visual, cur_mask_visual) 
-            a_logits, _ = self.a_cls_head(cur_out_audio, cur_mask_audio)
-            out_logits += (v_logits, )
-            # out_logits += (alpha * v_logits + (1 - alpha) * a_logits, )
-
-        return out_logits
-    
-    
-class ModifiedPtTransformerRegHead(PtTransformerRegHead):
-    def __init__(self, input_dim, feat_dim, fpn_levels, num_layers=3,
-                 kernel_size=3, act_layer=nn.ReLU, with_ln=False, num_heads=4):
-        super().__init__(input_dim, feat_dim, fpn_levels, num_layers, kernel_size, act_layer, with_ln)
-        
-        
-        # self.a_cross_attention_list = nn.ModuleList()
-        
-        # self.v_cross_attention_list = nn.ModuleList()
-        # for _ in range(fpn_levels):
-        #     self.a_cross_attention_list.append(MultiheadAttention(feat_dim, num_heads)) 
-        #     self.v_cross_attention_list.append(MultiheadAttention(feat_dim, num_heads))
-            
-        
-        # self.fuse_attention_query = nn.Linear(feat_dim, feat_dim)
-        # self.fuse_attention_key_value = nn.Linear(feat_dim * 2, feat_dim)
-        # self.fuse_attention = MultiheadAttention(feat_dim, num_heads)
-            
-        self.a_head = nn.ModuleList()
-        for idx in range(num_layers-1):
-            if idx == 0:
-                in_dim = input_dim
-                out_dim = feat_dim
-            else:
-                in_dim = feat_dim
-                out_dim = feat_dim
-            self.a_head.append(
-                MaskedConv1D(
-                    in_dim, out_dim, kernel_size,
-                    stride=1,
-                    padding=kernel_size//2,
-                    bias=(not with_ln)
-                )
-            )
-        self.mixers = torch.nn.Parameter(torch.full((fpn_levels,), 0.8))
-        
-
-        
-        # Cross-Attention layer
-
-    def forward(self, fpn_feats_visual, fpn_feats_audio, fpn_masks_visual, fpn_masks_audio):
-        out_offsets = tuple()
-        for l, (cur_feat_visual, cur_feat_audio, cur_mask_visual, cur_mask_audio) in enumerate(zip(fpn_feats_visual, fpn_feats_audio, fpn_masks_visual, fpn_masks_audio)):
-            cur_out_visual = cur_feat_visual
-            cur_out_audio = cur_feat_audio
-            B, E, L = cur_feat_visual.size()
-            _,_, aL = cur_feat_audio.size()
-            
-            # Apply 1D Conv layers
-            for idx in range(len(self.head)):
-                cur_out_visual, _ = self.head[idx](cur_out_visual, cur_mask_visual)
-                cur_out_audio, _ = self.a_head[idx](cur_out_audio, cur_mask_audio)
-                cur_out_visual = self.act(self.norm[idx](cur_out_visual))
-                cur_out_audio = self.act(self.norm[idx](cur_out_audio))
-                
-            joint_out = torch.cat((cur_out_visual, cur_out_audio), dim=1)   
-            joint_merge, _ = self.merge_heads(joint_out, cur_mask_visual)
-            
-            joint_merge = cur_out_visual + joint_merge
-            
-            joint_out, _ = self.v_offset_head(joint_merge, cur_mask_visual)
-                
-            # Apply cross-attention
-            
-            # cur_out_visual = cur_out_visual.permute(2, 0, 1)
-            # cur_out_audio = cur_out_audio.permute(2, 0, 1)
-            # k_pad_mask_a = ~cur_mask_audio.squeeze(1)
-            
-            # k_pad_mask_v = ~cur_mask_visual.squeeze(1)
-            # cur_out_audio, _ = self.a_cross_attention_list[l](cur_out_audio, cur_out_visual, cur_out_visual)
-            # cur_out_visual, _ = self.v_cross_attention_list[l](cur_out_visual, cur_out_audio, cur_out_audio)
-            # cur_out_visual = cur_out_visual.permute(1, 2, 0).reshape(B * L, E)
-            # cur_out_audio = cur_out_audio.permute(1, 2, 0).reshape(B * aL, E)
-            
-            # fused_query = self.fuse_attention_query(cur_out_visual).reshape(B, -1, E).permute(1, 0, 2)
-            # fused_key_value = self.fuse_attention_key_value(torch.cat((cur_out_visual, cur_out_audio), dim=-1)).reshape(B, -1, E).permute(1, 0, 2)
-            
-            # cur_out_visual, _ = self.fuse_attention(fused_query, fused_key_value, fused_key_value)
-            # cur_out_visual = cur_out_visual.permute(1, 2, 0)
-            
-            # Offset prediction
-            # breakpoint()
-            
-            # v_offsets, _ = self.v_offset_head(cur_out_visual, cur_mask_visual)
-            # a_offsets, _ = self.a_offset_head(cur_out_audio, cur_mask_audio)
-            
-            # join_offsets = torch.cat((a_offsets, v_offsets), dim=2)
-            # breakpoint()
-            
-            
-            # cur_offsets, _ = self.offset_head(cur_out_visual, cur_mask_visual)
-            j_offsets = F.relu(self.v_scale[l](joint_out))
-            # a_offsets = F.relu(self.a_scale[l](a_offsets))
-            # # v_offsets = F.normalize(v_offsets)
-            # # a_offsets = F.normalize(a_offsets)
-            # # out_offsets += (alpha * v_offsets + (1 - alpha) * a_offsets, )
-            # breakpoint()
-            out_offsets += (j_offsets, )
-
-        return out_offsets
-
-    
-class AudioEncoder(nn.Module):
-    def __init__(self, in_channels=1, hidden_dim=512, num_layers=7):
-        super(AudioEncoder, self).__init__()
-        
-        self.convs = nn.ModuleList()
-        self.norms = nn.ModuleList()
-        self.activations = nn.ModuleList()
-        
-        for i in range(num_layers):
-            dilation = 2 ** i
-            padding = int((10 - 1) * dilation / 2)
-            
-            in_dim = in_channels if i == 0 else hidden_dim
-            out_dim = hidden_dim
-            
-            self.convs.append(nn.Conv1d(in_dim, out_dim, kernel_size=10, stride=5, dilation=dilation, padding=padding))
-            self.norms.append(LayerNorm(out_dim))
-            self.activations.append(nn.GELU())
-        
-    def forward(self, x):
-        for conv, norm, activation in zip(self.convs, self.norms, self.activations):
-            x = conv(x)
-            x = activation(x)
-            x = norm(x)
-        return x
-
 @register_meta_arch("LocPointTransformer")
 class PtTransformer(nn.Module):
     """
@@ -436,6 +197,7 @@ class PtTransformer(nn.Module):
         n_mha_win_size,        # window size for self attention; -1 to use full seq
         embd_kernel_size,      # kernel size of the embedding network
         embd_dim,              # output feat channel of the embedding network
+        audio_embd_dim,
         embd_with_ln,          # attach layernorm to embedding network
         fpn_dim,               # feature dim on FPN
         fpn_with_ln,           # if to apply layer norm at the end of fpn
@@ -449,7 +211,9 @@ class PtTransformer(nn.Module):
         use_rel_pe,            # if to use rel position encoding
         num_classes,           # number of action classes
         train_cfg,             # other cfg for training
-        test_cfg               # other cfg for testing
+        test_cfg,               # other cfg for testing
+        audio_fusion_method,
+        fpn_norm,
     ):
         super().__init__()
          # re-distribute params to backbone / neck / head
@@ -461,7 +225,11 @@ class PtTransformer(nn.Module):
         self.scale_factor = scale_factor
         # #classes = num_classes + 1 (background) with last category as background
         # e.g., num_classes = 10 -> 0, 1, ..., 9 as actions, 10 as background
+        
+        self.train_droppath = train_cfg['droppath']
         self.num_classes = num_classes
+        self.audio_fusion_method = audio_fusion_method
+        self.dependency_block = Dependency_Block(in_channel=embd_dim*2, n_embd=128, n_embd_ks=embd_kernel_size, num_classes=self.num_classes, path_pdrop=self.train_droppath, n_head=4)
 
         # check the feature pyramid and local attention window size
         self.max_seq_len = max_seq_len
@@ -476,7 +244,8 @@ class PtTransformer(nn.Module):
             assert max_seq_len % stride == 0, "max_seq_len must be divisible by fpn stride and window size"
             if max_div_factor < stride:
                 max_div_factor = stride
-        self.max_div_factor = max_div_factor
+        self.max_div_factor = max_div_factor 
+        self.use_audio = train_cfg['use_audio']
 
         # training time config
         self.train_center_sample = train_cfg['center_sample']
@@ -487,10 +256,6 @@ class PtTransformer(nn.Module):
         self.train_dropout = train_cfg['dropout']
         self.train_droppath = train_cfg['droppath']
         self.train_label_smoothing = train_cfg['label_smoothing']
-        self.use_audio = train_cfg['use_audio']
-        self.audio_fusion_stage = train_cfg['audio_fusion_stage']
-        self.validate_step = False
-        # self.audio_encoder = AudioEncoder()
 
         # test time config
         self.test_pre_nms_thresh = test_cfg['pre_nms_thresh']
@@ -504,31 +269,118 @@ class PtTransformer(nn.Module):
         self.test_multiclass_nms = test_cfg['multiclass_nms']
         self.test_nms_sigma = test_cfg['nms_sigma']
         self.test_voting_thresh = test_cfg['voting_thresh']
-        
 
         # we will need a better way to dispatch the params to backbones / necks
         # backbone network: conv + transformer
-        assert backbone_type in ['convTransformer', 'conv', 'convTransformerAudio', 'convTransformerAudioVgg']
+        assert backbone_type in ['convTransformer', 'unAV', 'conv', 'crossmodalTransformer', 'convPooler', 'convPoolerMHA']
+        
+        if backbone_type == "unAV":
+            self.backbone = make_backbone(
+                'unAV',
+                **{
+                    'n_in_V' : input_dim,
+                    'n_in_A' : audio_embd_dim,
+                    'n_embd' : embd_dim,
+                    'n_head': 2,
+                    'n_embd_ks': embd_kernel_size,
+                    'max_len': max_seq_len,
+                    'arch' : backbone_arch,
+                    'scale_factor' : scale_factor,
+                    'with_ln' : embd_with_ln,
+                    'attn_pdrop' : 0.0,
+                    'proj_pdrop' : self.train_dropout,
+                    'path_pdrop' : self.train_droppath,
+                    'use_abs_pe' : use_abs_pe,
+            } 
+            )
+             
         # if backbone_type == 'convTransformer':
-        self.backbone = make_backbone(
-            'convTransformer',
-            **{
-                'n_in' : input_dim,
-                'n_embd' : embd_dim,
-                'n_head': n_head,
-                'n_embd_ks': embd_kernel_size,
-                'max_len': max_seq_len,
-                'arch' : backbone_arch,
-                'mha_win_size': self.mha_win_size,
-                'scale_factor' : scale_factor,
-                'with_ln' : embd_with_ln,
-                'attn_pdrop' : 0.0,
-                'proj_pdrop' : self.train_dropout,
-                'path_pdrop' : self.train_droppath,
-                'use_abs_pe' : use_abs_pe,
-                'use_rel_pe' : use_rel_pe
-            }
-        )
+        #     if self.use_audio:
+        #         assert("convTransformer is unimodal only")
+        #     self.backbone = make_backbone(
+        #         'convTransformer',
+        #         **{
+        #             'n_in' : input_dim,
+        #             'n_embd' : embd_dim,
+        #             'n_head': n_head,
+        #             'n_embd_ks': embd_kernel_size,
+        #             'max_len': max_seq_len,
+        #             'arch' : backbone_arch,
+        #             'mha_win_size': self.mha_win_size,
+        #             'scale_factor' : scale_factor,
+        #             'with_ln' : embd_with_ln,
+        #             'attn_pdrop' : 0.0,
+        #             'proj_pdrop' : self.train_dropout,
+        #             'path_pdrop' : self.train_droppath,
+        #             'use_abs_pe' : use_abs_pe,
+        #             'use_rel_pe' : use_rel_pe
+        #         }
+        #     )
+            
+        # elif backbone_type == "convPooler":
+        #     self.backbone = make_backbone(
+        #         'convPooler',
+        #         **{
+        #             'n_in': input_dim,
+        #             'n_embd': embd_dim,
+        #             'n_embd_ks': embd_kernel_size,
+        #             'max_len': max_seq_len,
+        #             'arch': backbone_arch,
+        #             'scale_factor': scale_factor,
+        #             'with_ln': embd_with_ln,
+        #         }
+        #     )
+        #     if self.use_audio: 
+        #         self.audio_backbone = make_backbone(
+        #             'convPooler',
+        #             **{
+        #                 'n_in': audio_embd_dim,
+        #                 'n_embd': embd_dim,
+        #                 'n_embd_ks': embd_kernel_size,
+        #                 'max_len': max_seq_len,
+        #                 'arch': backbone_arch,
+        #                 'scale_factor': scale_factor,
+        #                 'with_ln': embd_with_ln,
+        #             }
+        #         )
+                
+        # elif backbone_type == "convPoolerMHA":
+        #     self.backbone = make_backbone( 
+        #         'convPoolerMHA',
+        #         **{
+        #             'n_in': input_dim,
+        #             'n_embd': embd_dim,
+        #             'n_embd_ks': embd_kernel_size,
+        #             'max_len': max_seq_len,
+        #             'arch': backbone_arch,
+        #             'scale_factor': scale_factor,
+        #             'with_ln': embd_with_ln,
+        #         }
+        #     )
+                
+        # elif backbone_type == "crossmodalTransformer":
+        #     if not self.use_audio:
+        #         assert("cross modal transformer only supports audio fusion methods")
+        #     self.backbone = make_backbone(
+        #         'crossmodalTransformer', 
+        #         **{
+        #             'n_in' : input_dim,
+        #             'n_embd' : embd_dim,
+        #             'n_audio_embd': audio_embd_dim,
+        #             'n_head': n_head,
+        #             'n_embd_ks': embd_kernel_size,
+        #             'max_len': max_seq_len,
+        #             'arch' : backbone_arch,
+        #             'mha_win_size': self.mha_win_size,
+        #             'scale_factor' : scale_factor,
+        #             'with_ln' : embd_with_ln,
+        #             'attn_pdrop' : 0.0,
+        #             'proj_pdrop' : self.train_dropout,
+        #             'path_pdrop' : self.train_droppath,
+        #             'use_abs_pe' : use_abs_pe,
+        #             'use_rel_pe' : use_rel_pe
+        #         }
+        #     )
         # else:
         #     self.backbone = make_backbone(
         #         'conv',
@@ -541,92 +393,36 @@ class PtTransformer(nn.Module):
         #             'with_ln' : embd_with_ln
         #         }
         #     )
-        
-        if self.use_audio:
-            
-            if backbone_type == 'convTransformerAudio':
-                self.audio_backbone = make_backbone(
-                    'convTransformerAudio',
-                    **{
-                        'n_in' : 1,
-                        'n_embd' : 512,
-                        'n_head': n_head,
-                        'n_embd_ks': embd_kernel_size,
-                        'max_len': max_seq_len,
-                        'arch' : backbone_arch,
-                        'mha_win_size': self.mha_win_size,
-                        'scale_factor' : scale_factor,
-                        'with_ln' : embd_with_ln,
-                        'attn_pdrop' : 0.0,
-                        'proj_pdrop' : self.train_dropout,
-                        'path_pdrop' : self.train_droppath,
-                        'use_abs_pe' : use_abs_pe,
-                        'use_rel_pe' : use_rel_pe
-                    }
-                )
-            elif backbone_type == 'convTransformerAudioVgg':
-                
-                self.audio_backbone = make_backbone(
-                    'convTransformerVgg',
-                    **{
-                        'n_in' : 1,
-                        'n_embd' : 512,
-                        'n_head': n_head,
-                        'n_embd_ks': embd_kernel_size,
-                        'max_len': max_seq_len,
-                        'arch' : backbone_arch,
-                        'mha_win_size': self.mha_win_size,
-                        'scale_factor' : scale_factor,
-                        'with_ln' : embd_with_ln,
-                        'attn_pdrop' : 0.0,
-                        'proj_pdrop' : self.train_dropout,
-                        'path_pdrop' : self.train_droppath,
-                        'use_abs_pe' : use_abs_pe,
-                        'use_rel_pe' : use_rel_pe
-                    }
-                )
-                
-            else: 
-                self.backbone = make_backbone(
-                    'conv',
-                    **{
-                        'n_in': train_cfg["audio_input_dim"],
-                        'n_embd': embd_dim,
-                        'n_embd_ks': embd_kernel_size,
-                        'arch': backbone_arch,
-                        'scale_factor': scale_factor,
-                        'with_ln' : embd_with_ln
-                    }
-                )
-                 
         if isinstance(embd_dim, (list, tuple)):
             embd_dim = sum(embd_dim)
 
         # fpn network: convs
         assert fpn_type in ['fpn', 'identity']
-        self.neck = make_neck(
-            fpn_type,
-            **{
-                'in_channels' : [embd_dim] * (backbone_arch[-1] + 1),
-                'out_channel' : fpn_dim,
-                'scale_factor' : scale_factor,
-                'start_level' : fpn_start_level,
-                'with_ln' : fpn_with_ln
-            }
-        )
+        # self.neck = make_neck(
+        #     fpn_type,
+        #     **{
+        #         'in_channels' : [embd_dim] * (backbone_arch[-1] + 1),
+        #         'out_channel' : fpn_dim,
+        #         'scale_factor' : scale_factor,
+        #         'start_level' : fpn_start_level,
+        #         'with_ln' : fpn_with_ln,
+        #         'fpn_norm': fpn_norm,
+        #     }
+        # )
         
+        # self.neck = make_neck(
+        #     fpn_type,
+            
+        # **{
+        #     'in_channels' : [embd_dim] * (backbone_arch[-1] + 1),
+        #     'out_channel' : fpn_dim,
+        #     'scale_factor' : scale_factor,
+        #     'start_level' : fpn_start_level,
+        #     'with_ln' : fpn_with_ln,
+        #     'fpn_norm': fpn_norm,
+        # } 
+        # )
         
-        self.a_neck = make_neck(
-            fpn_type,
-            **{
-                'in_channels' : [embd_dim] * (backbone_arch[-1] + 1),
-                'out_channel' : fpn_dim,
-                'scale_factor' : scale_factor,
-                'start_level' : fpn_start_level,
-                'with_ln' : fpn_with_ln
-            }
-        )
-
         # location generator: points
         self.point_generator = make_generator(
             'point',
@@ -636,46 +432,48 @@ class PtTransformer(nn.Module):
                 'regression_range' : self.reg_range
             }
         )
-
-        # classfication and regerssion heads
         
-        if self.audio_fusion_stage in ["cross_att_cls", "cross_att_both"]:
-            self.cls_head = ModifiedPtTransformerClsHead(
-                fpn_dim, head_dim, len(self.fpn_strides), self.num_classes,
-                kernel_size=head_kernel_size,
-                prior_prob=self.train_cls_prior_prob,
-                with_ln=head_with_ln,
-                num_layers=head_num_layers,
-                empty_cls=train_cfg['head_empty_cls']
-            )
-        else: 
-            self.cls_head = PtTransformerClsHead(
-                fpn_dim, head_dim, self.num_classes,
-                kernel_size=head_kernel_size,
-                prior_prob=self.train_cls_prior_prob,
-                with_ln=head_with_ln,
-                num_layers=head_num_layers,
-                empty_cls=train_cfg['head_empty_cls']
-            )
-        if self.audio_fusion_stage in ["cross_att_regression", "cross_att_both"]:
-            self.reg_head = ModifiedPtTransformerRegHead(
-                fpn_dim, head_dim, len(self.fpn_strides),
-                kernel_size=head_kernel_size,
-                num_layers=head_num_layers,
-                with_ln=head_with_ln
-                )
-        else:
-            self.reg_head = PtTransformerRegHead(
-                fpn_dim, head_dim, len(self.fpn_strides),
-                kernel_size=head_kernel_size,
-                num_layers=head_num_layers,
-                with_ln=head_with_ln
-            )
-
+        # if self.audio_fusion_method == "cross_att":  
+        #     # raise Exception("not yet implemented")
+        #     self.fusion_branch = CrossAttFusion()
+        # elif self.audio_fusion_method == "concat":
+        #     self.fusion_branch = ConcatFusion()
+        # elif self.audio_fusion_method == "att":
+        #     raise Exception("not yet implemented")
+        #     self.fusion_branch = Att_Fusion()
+        # elif self.audio_fusion_method == "sum":
+        #     self.fusion_branch = SumFusion()
+        
+        # # classfication and regerssion heads
+        # if self.audio_fusion_method == "concat":
+        #     fpn_dim = fpn_dim * 2
+        self.cls_head = PtTransformerClsHead(
+            fpn_dim, head_dim, self.num_classes,
+            kernel_size=head_kernel_size,
+            prior_prob=self.train_cls_prior_prob,
+            with_ln=head_with_ln,
+            num_layers=head_num_layers,
+            empty_cls=train_cfg['head_empty_cls']
+        )
+        self.reg_head = PtTransformerRegHead(
+            fpn_dim, head_dim, len(self.fpn_strides),
+            kernel_size=head_kernel_size,
+            num_layers=head_num_layers,
+            with_ln=head_with_ln
+        )
+        
+        # if self.use_audio and self.audio_fusion_method == "concat" or self.audio_fusion_method == "joint":
+        #     self.fusion_layers = torch.nn.ModuleList()
+        #     for idx in range(len(self.fpn_strides)):
+        #         self.fusion_layers.append(
+        #             MaskedConv1D(embd_dim*2, embd_dim, 1)
+        #         )
+                
         # maintain an EMA of #foreground to stabilize the loss normalizer
         # useful for small mini-batch training
         self.loss_normalizer = train_cfg['init_loss_norm']
-        self.loss_normalizer_momentum = 0.9
+        self.loss_normalizer_momentum = 0.9 
+        self.backbone_type = backbone_type
 
     @property
     def device(self):
@@ -685,70 +483,43 @@ class PtTransformer(nn.Module):
 
     def forward(self, video_list):
         # batch the video list into feats (B, C, T) and masks (B, 1, T)
-        if self.use_audio:
-            batched_inputs, batched_masks, batched_a_inputs, batched_a_masks = self.preprocessing_audio(video_list)
-        else: 
-            batched_inputs, batched_masks = self.preprocessing(video_list)
-        
-            
-            
-        # forward the network (backbone -> neck -> heads)
-        feats, masks = self.backbone(batched_inputs, batched_masks)
          
         if self.use_audio:
-            combined_feats = []
-            if self.audio_fusion_stage == "backbone":
-                
-                a_feats, a_masks = self.audio_backbone(batched_a_inputs, batched_a_masks)
-                for t1, t2 in zip(feats, a_feats):
-                    if t1.shape != t2.shape:
-                        raise ValueError("Tensors must be same shape")
-                    combined_feats.append(t1 + t2)
-                feats = tuple(combined_feats)
-            elif self.audio_fusion_stage in ["cross_att_regression", "cross_att_cls", "cross_att_both"]: 
-                a_feats, a_masks = self.audio_backbone(batched_a_inputs, batched_a_masks)
-                fpn_audio_feats, fpn_audio_masks = self.a_neck(a_feats, a_masks)
-            else:
-                B, S, F = batched_a_inputs.size()
-                batched_a_inputs = batched_a_inputs.view(1, 1, -1)
-                batched_a_inputs = self.audio_encoder(batched_a_inputs)
-                # breakpoint()
-                # batched_a_feats = batched_a_inputs.view(B, S, -1).permute(0, 2, 1)
-                # breakpoint()
-        
+            # older method 
+            # batched_inputs, batched_audio, batched_masks = self.preprocessing(video_list, audio=True)  
+            # feats, masks = self.backbone(batched_inputs, batched_masks) 
+            # fpn_feats, fpn_masks = self.neck(feats, masks)
+            # a_feats, _ = self.audio_backbone(batched_audio, batched_masks)
+            # fpn_a_feats, _ = self.a_neck(a_feats, masks) 
+            # fused_feats = self.fusion_branch(fpn_feats, fpn_a_feats, fpn_masks)
+            # cls_feats = fused_feats
+            # reg_feats = fused_feats
+            # method with avNA
             
-        # just use audio for reg head here?? 
-                    
+            batched_inputs_V, batched_inputs_A, batched_masks = self.preprocessing_av(video_list)
             
-        fpn_feats, fpn_masks = self.neck(feats, masks)
-        
-        # compute the point coordinate along the FPN
-        # this is used for computing the GT or decode the final results
-        # points: List[T x 4] with length = # fpn levels
-        # (shared across all samples in the mini-batch)
-        points = self.point_generator(fpn_feats)
-        
+            feats_V, feats_A, masks = self.backbone(batched_inputs_V, batched_inputs_A, batched_masks)
 
-        # out_cls: List[B, #cls + 1, T_i]
-        if self.audio_fusion_stage in ["cross_att_cls", "cross_att_both"]:
-            out_cls_logits = self.cls_head(fpn_feats, fpn_audio_feats, fpn_masks, fpn_audio_masks)
+            #concat audio and visual output features (B, C, T)->(B, 2C, T)
+            feats_AV = [torch.cat((V, A), 1) for _, (V, A) in enumerate(zip(feats_V, feats_A))]
+            
+            # feats_AV,  _ = self.dependency_block(feats_AV, masks)
+            cls_feats = feats_AV
+            reg_feats = feats_AV
+            
         else:
-            out_cls_logits = self.cls_head(fpn_feats, fpn_masks)
-        
-        if self.audio_fusion_stage in ["cross_att_regression", "cross_att_both"]:
-            out_offsets = self.reg_head(fpn_feats, fpn_audio_feats, fpn_masks, fpn_audio_masks)
-        else: 
-            out_offsets = self.reg_head(fpn_feats, fpn_masks)
-
-        # permute the outputs
-        # out_cls: F List[B, #cls, T_i] -> F List[B, T_i, #cls]
+            batched_inputs, batched_masks = self.preprocessing(video_list, audio=False) 
+            feats, masks = self.backbone(batched_inputs, batched_masks) 
+            fpn_feats, fpn_masks = self.neck(feats, masks)
+             
+        out_cls_logits = self.cls_head(cls_feats, masks)
+        out_offsets = self.reg_head(reg_feats, masks)
+        # reg feats set as point_gen - maybe change to cls or img feats?? 
+        points = self.point_generator(cls_feats)
         out_cls_logits = [x.permute(0, 2, 1) for x in out_cls_logits]
-        # out_offset: F List[B, 2 (xC), T_i] -> F List[B, T_i, 2 (xC)]
         out_offsets = [x.permute(0, 2, 1) for x in out_offsets]
-        # fpn_masks: F list[B, 1, T_i] -> F List[B, T_i]
-        fpn_masks = [x.squeeze(1) for x in fpn_masks]
+        fpn_masks = [x.squeeze(1) for x in masks]
 
-        # return loss during training
         if self.training:
             # generate segment/lable List[N x 2] / List[N] with length = B
             assert video_list[0]['segments'] is not None, "GT action labels does not exist"
@@ -776,96 +547,102 @@ class PtTransformer(nn.Module):
                 out_cls_logits, out_offsets
             )
             return results
-
+        
+        
     @torch.no_grad()
-    def preprocessing(self, video_list, padding_val=0.0):
+    def preprocessing_av(self, video_list, padding_val=0.0):
         """
             Generate batched features and masks from a list of dict items
         """
-        feats = [x['feats'] for x in video_list]
-        feats_lens = torch.as_tensor([feat.shape[-1] for feat in feats])
-        max_len = feats_lens.max(0).values.item()
+        feats_visual = [x['feats'] for x in video_list]
+        feats_audio = [x['audio_feats'] for x in video_list]
+        feats_lens = torch.as_tensor([feat_visual.shape[-1] for feat_visual in feats_visual])
+        max_len = feats_lens.max(0).values.item() 
 
         if self.training:
             assert max_len <= self.max_seq_len, "Input length must be smaller than max_seq_len during training"
             # set max_len to self.max_seq_len
             max_len = self.max_seq_len
-            # batch input shape B, C, T
-            batch_shape = [len(feats), feats[0].shape[0], max_len]
-            batched_inputs = feats[0].new_full(batch_shape, padding_val)
-            for feat, pad_feat in zip(feats, batched_inputs):
-                pad_feat[..., :feat.shape[-1]].copy_(feat)
         else:
-            assert len(video_list) == 1, "Only support batch_size = 1 during inference"
-            # input length < self.max_seq_len, pad to max_seq_len
             if max_len <= self.max_seq_len:
                 max_len = self.max_seq_len
             else:
                 # pad the input to the next divisible size
                 stride = self.max_div_factor
                 max_len = (max_len + (stride - 1)) // stride * stride
-            padding_size = [0, max_len - feats_lens[0]]
-            batched_inputs = F.pad(
-                feats[0], padding_size, value=padding_val).unsqueeze(0)
 
-        # generate the mask
+        # batch input shape B, C, T->visual
+        batch_shape_visual = [len(feats_visual), feats_visual[0].shape[0], max_len]
+        batched_inputs_visual = feats_visual[0].new_full(batch_shape_visual, padding_val)
+        for feat_visual, pad_feat_visual in zip(feats_visual, batched_inputs_visual):
+            pad_feat_visual[..., :feat_visual.shape[-1]].copy_(feat_visual)
+
+        # audio 
+        batch_shape_audio = [len(feats_audio), feats_audio[0].shape[0], max_len]
+        batched_inputs_audio = feats_audio[0].new_full(batch_shape_audio, padding_val)
+        for feat_audio, pad_feat_audio in zip(feats_audio, batched_inputs_audio):
+            pad_feat_audio[..., :feat_audio.shape[-1]].copy_(feat_audio) 
+   
+        # generate the mask 
         batched_masks = torch.arange(max_len)[None, :] < feats_lens[:, None]
-
         # push to device
-        batched_inputs = batched_inputs.to(self.device)
+        batched_inputs_visual = batched_inputs_visual.to(self.device)
+        batched_inputs_audio = batched_inputs_audio.to(self.device)
+        
         batched_masks = batched_masks.unsqueeze(1).to(self.device)
 
-        return batched_inputs, batched_masks
-    
+        return batched_inputs_visual, batched_inputs_audio, batched_masks
+
     @torch.no_grad()
-    def preprocessing_audio(self, video_list, padding_val=0.0):
+    def preprocessing(self, video_list, padding_val=0.0, audio=False):
         """
             Generate batched features and masks from a list of dict items
         """
         feats = [x['feats'] for x in video_list]
-        audio_feats = [x['audio_feats'] for x in video_list]
-        
-
         feats_lens = torch.as_tensor([feat.shape[-1] for feat in feats])
-        audio_feats_lens = torch.as_tensor([audio_feat.shape[-1] for audio_feat in audio_feats] )
-
         max_len = feats_lens.max(0).values.item()
-        max_audio_len = audio_feats_lens.max(0).values.item()
+        if audio:
+            audio_feats = [x['audio_feats'] for x in video_list]
+            
+            audio_feats_lens = torch.as_tensor([audio_feat.shape[-1] for audio_feat in audio_feats])
+            max_audio_len = audio_feats_lens.max(0).values.item()
         
-
-        def process_feats(feats, feats_lens, max_len, padding_val):
+        def batching(feats, feats_lens, max_len):
             if self.training:
                 assert max_len <= self.max_seq_len, "Input length must be smaller than max_seq_len during training"
+                # set max_len to self.max_seq_len
                 max_len = self.max_seq_len
+                # batch input shape B, C, T
                 batch_shape = [len(feats), feats[0].shape[0], max_len]
                 batched_inputs = feats[0].new_full(batch_shape, padding_val)
                 for feat, pad_feat in zip(feats, batched_inputs):
                     pad_feat[..., :feat.shape[-1]].copy_(feat)
             else:
                 assert len(video_list) == 1, "Only support batch_size = 1 during inference"
+                # input length < self.max_seq_len, pad to max_seq_len
                 if max_len <= self.max_seq_len:
                     max_len = self.max_seq_len
                 else:
+                    # pad the input to the next divisible size
                     stride = self.max_div_factor
                     max_len = (max_len + (stride - 1)) // stride * stride
                 padding_size = [0, max_len - feats_lens[0]]
-                batched_inputs = F.pad(feats[0], padding_size, value=padding_val).unsqueeze(0)
+                batched_inputs = F.pad(
+                    feats[0], padding_size, value=padding_val).unsqueeze(0)
 
+            # generate the mask
             batched_masks = torch.arange(max_len)[None, :] < feats_lens[:, None]
 
-            return batched_inputs.to(self.device), batched_masks.unsqueeze(1).to(self.device)
-        
-
-        # Process video features
-        batched_feats, batched_masks = process_feats(feats, feats_lens, max_len, padding_val)
-        if self.training:
-            batched_a_feats, batched_a_masks = process_feats(audio_feats, audio_feats_lens, max_audio_len, padding_val)
-        else: 
-            batched_a_feats, batched_a_masks = process_feats(audio_feats, audio_feats_lens, max_len, padding_val)
-        
-        # Process audio features
-
-        return batched_feats, batched_masks, batched_a_feats, batched_a_masks
+            # push to device
+            batched_inputs = batched_inputs.to(self.device)
+            batched_masks = batched_masks.unsqueeze(1).to(self.device)
+            return batched_inputs, batched_masks
+        batched_vid, batched_masks = batching(feats, feats_lens, max_len)
+        if audio:
+            batched_audio, _ = batching(audio_feats, feats_lens, max_len)
+            return batched_vid, batched_audio, batched_masks
+        else:
+            return batched_vid, batched_masks
 
     @torch.no_grad()
     def label_points(self, points, gt_segments, gt_labels):
@@ -1192,3 +969,4 @@ class PtTransformer(nn.Module):
             )
 
         return processed_results
+    

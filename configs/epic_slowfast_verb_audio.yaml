@@ -1,10 +1,10 @@
-dataset_name: epic
+dataset_name: epic-audio
 train_split: ['training']
 val_split: ['validation']
 dataset: {
-  json_file: /home/ed/actionformer_release/data/epic_kitchens_100_verb.json,
+  json_file: data/epic_kitchens_100_verb.json,
   feat_folder: /mnt/welles/scratch/datasets/epic-feats/epic_kitchens/features,
-  audio_folder: /mnt/welles/scratch/datasets/epic-vgg/
+  audio_folder: /mnt/welles/scratch/datasets/epic-vgg/,
   file_prefix: ~,
   file_ext: .npz,
   num_classes: 97,
@@ -15,6 +15,8 @@ dataset: {
   trunc_thresh: 0.3,
   crop_ratio: [0.9, 1.0],
   max_seq_len: 2304,
+  use_audio: True,
+  audio_format: vgg,
 
 }
 model: {
@@ -22,17 +24,18 @@ model: {
   fpn_type: identity,
   max_buffer_len_factor: 4.0,
   n_mha_win_size: 9,
+  fpn_norm: layernorm,
 
+  # backbone_type: crossmodalTransformer,
 
-  backbone_type: convPooler,
-  backbone_arch: [2, 5],
+  backbone_type: unAV, # convPooler, unAV
+  backbone_arch: [1, 1, 5],
   audio_embd_dim: 128,
-  audio_fusion_loc: ["pre-neck", "pre-cls"],  # pre-neck, pre-backbone, pre-cls, pre-reg
-  audio_fusion_method: concat, # concat, sum, cross_att
+  audio_fusion_method: cross_att, # concat, sum, mha, cross_att, unAV
 }
 opt: {
   learning_rate: 0.0001,
-  epochs: 16,
+  epochs: 32,
   weight_decay: 0.05,
 }
 loader: {
@@ -44,6 +47,7 @@ train_cfg: {
   cls_prior_prob: 0.01,
   center_sample: radius,
   center_sample_radius: 1.5,
+  use_audio: True
 }
 test_cfg: {
   pre_nms_topk: 5000,

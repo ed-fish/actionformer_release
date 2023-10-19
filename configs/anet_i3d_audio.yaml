@@ -1,41 +1,51 @@
-dataset_name: anet
+# This is an updated config for using I3D on ActivtyNet, resulting in slightly
+# better performance. To reproduce the setting in our paper, set
+# max_seq_len: 160,
+# n_mha_win_size: [11, 11, 11, 11, -1, -1],
+
+dataset_name: anet-audio
 train_split: ['training']
 val_split: ['validation']
 dataset: {
-  json_file: /home/ed/actionformer_release/data/anet/anet1.3_tsp_filtered.json,
-  feat_folder: /mnt/welles/scratch/datasets/Activity-Net/v1-3/tsp_feats/tsp_features,
+  json_file: data/anet/anet1.3_i3d_filtered.json,
+  feat_folder: /mnt/welles/scratch/datasets/Activity-Net/anet_1.3/i3d_features,
+  audio_folder: /mnt/welles/scratch/datasets/Activity-Net/v1-3/wav_whole,
   file_prefix: v_,
   file_ext: .npy,
   num_classes: 1,
-  input_dim: 512,
+  input_dim: 2048,
   feat_stride: 16,
   num_frames: 16,
-  default_fps: 15,
+  default_fps: 25,
   trunc_thresh: 0.5,
   crop_ratio: [0.9, 1.0],
   # upsample the features to a fixed length of 192
   max_seq_len: 192,
   force_upsampling: True,
+  use_audio: True,
+  audio_format: mel_spec
 }
+
 model: {
   fpn_type: identity,
   max_buffer_len_factor: 1.0,
   # 192 - 96 - 48 - 24 - 12 - 6
   n_mha_win_size: [7, 7, 7, 7, 7, -1],
-  # shrink the model for reduced input feature channels
   n_head: 4,
   embd_dim: 256,
   fpn_dim: 256,
   head_dim: 256,
-  use_abs_pe: True,
+  use_abs_pe: False,
+  backbone_type: crossmodalTransformer,
+  # backbone_type: convTransformerAudio,
 }
 opt: {
-  learning_rate: 0.001,
-  epochs: 10,
+  learning_rate: 0.0009,
+  epochs: 30,
   weight_decay: 0.05,
 }
 loader: {
-  batch_size: 16,
+  batch_size: 32,
 }
 train_cfg: {
   init_loss_norm: 200,
@@ -46,6 +56,11 @@ train_cfg: {
   label_smoothing: 0.1,
   droppath: 0.1,
   loss_weight: 2.0,
+  use_audio: True,
+  audio_fusion_stage: "cross_att_regression",
+  split_feats: False,
+  audio_input_dim: 64,
+  max_audio_seq_len: 960,
 }
 
 # similar to THUMOS

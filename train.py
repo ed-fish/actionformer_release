@@ -151,7 +151,7 @@ def main(args):
             tiou_thresholds = val_db_vars['tiou_thresholds']
         )
         
-        if epoch > 20:
+        if epoch > 2:
             
             save_states = {
                 'epoch': epoch + 1,
@@ -169,16 +169,16 @@ def main(args):
             )
         
         
-            result = valid_one_epoch(
-                val_loader,
-                model,
-                epoch,
-                evaluator=det_eval,
-                tb_writer=tb_writer,
-                print_freq=args.print_freq
-            )
+            # result = valid_one_epoch(
+            #     val_loader,
+            #     model,
+            #     epoch,
+            #     evaluator=det_eval,
+            #     tb_writer=tb_writer,
+            #     print_freq=args.print_freq
+            # )
             
-            print(result)
+            # print(result)
             
 
             # save ckpt once in a while

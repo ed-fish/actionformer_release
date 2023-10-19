@@ -16,6 +16,13 @@ def register_neck(name):
         return cls
     return decorator
 
+dependency_blocks = {}
+def register_dependency_block(name):
+    def decorator(cls):
+        dependency_blocks[name] = cls
+        return cls
+    return decorator
+
 # location generator (point, segment, etc)
 generators = {}
 def register_generator(name):
@@ -48,3 +55,7 @@ def make_meta_arch(name, **kwargs):
 def make_generator(name, **kwargs):
     generator = generators[name](**kwargs)
     return generator
+
+def make_dependency_block(name, **kwargs):
+    dependency_block = dependency_blocks[name](**kwargs)
+    return dependency_block

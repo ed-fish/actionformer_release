@@ -18,6 +18,7 @@ class FPN1D(nn.Module):
         start_level=0,    # start fpn level
         end_level=-1,     # end fpn level
         with_ln=True,     # if to apply layer norm at the end
+        fpn_norm="groupnorm",
     ):
         super().__init__()
         assert isinstance(in_channels, list) or isinstance(in_channels, tuple)
@@ -101,6 +102,8 @@ class FPNIdentity(nn.Module):
         start_level=0,    # start fpn level
         end_level=-1,     # end fpn level
         with_ln=True,     # if to apply layer norm at the end
+        num_group=4,
+        fpn_norm='groupnorm'
     ):
         super().__init__()
 
@@ -121,8 +124,10 @@ class FPNIdentity(nn.Module):
             # check feat dims
             assert self.in_channels[i] == self.out_channel
             # layer norm for order (B C T)
-            if with_ln:
-                fpn_norm = LayerNorm(out_channel)
+            if fpn_norm == 'groupnorm':
+                fpn_norm = nn.GroupNorm(num_group, out_channel, affine=False)
+            elif fpn_norm == 'layernorm':
+                fpn_norm = LayerNorm(self.out_channel)
             else:
                 fpn_norm = nn.Identity()
             self.fpn_norms.append(fpn_norm)

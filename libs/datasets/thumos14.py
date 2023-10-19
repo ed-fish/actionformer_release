@@ -10,9 +10,11 @@ import torchaudio
 from .datasets import register_dataset
 from .data_utils import truncate_feats
 from torchaudio.transforms import MelSpectrogram
+import matplotlib.pyplot as plt
+
 
 from scipy.interpolate import interp1d
-
+import librosa
 
 
 @register_dataset("thumos")
@@ -338,8 +340,9 @@ class THUMOS14AudioDataset(Dataset):
         # Load video features
         filename = os.path.join(self.feat_folder, self.file_prefix + video_item['id'] + self.file_ext)
         feats = np.load(filename).astype(np.float32)
-
-        # Load audio features
+        feats = torch.from_numpy(np.ascontiguousarray(feats))
+        feats = feats.transpose(1, 0)
+        
         if self.use_audio: 
             if self.audio_format == "raw_wav":    
                 audio_file = os.path.join(self.raw_audio_folder, self.file_prefix + video_item['id'] + ".wav")
@@ -359,34 +362,22 @@ class THUMOS14AudioDataset(Dataset):
             elif self.audio_format == "mel_spec": 
                 audio_file = os.path.join(self.audio_folder, self.file_prefix + video_item['id'] + self.file_ext) 
                 audio_feats = np.load(audio_file).astype(np.float32)
-                g_mean = np.min(audio_feats)
-                g_std = np.std(audio_feats)
-                audio_feats = (audio_feats - g_mean) / (g_std + 0.00001)
             elif self.audio_format == "vgg": 
                 audio_file = os.path.join(self.audio_folder, self.file_prefix + video_item['id'] + self.file_ext) 
-                audio_feats = np.load(audio_file).astype(np.float32) 
+                audio_feats = np.load(audio_file).astype(np.float32) / 255
             else:
                 raise Exception(f"{self.audio_format} not recognized")
              
-            audio_feats = torch.from_numpy(np.ascontiguousarray(audio_feats)) / 255
-            # mean = audio_feats.mean(dim=0, keepdim=True)
-            # std = audio_feats.std(dim=0, keepdim=True)
-
-            # Normalize each stack
-            # audio_feats = (audio_feats - mean) / (std + 1e-7)
-            audio_feats = audio_feats.transpose(1, 0)
+            audio_feats = torch.from_numpy(np.ascontiguousarray(audio_feats)).transpose(0, 1) 
             
-        
-        feats = torch.from_numpy(np.ascontiguousarray(feats))
-        feats = feats.transpose(1, 0)
-        
-        # a_e = audio_feats.shape[-1]
-        # v_e = feats.shape[-1]
-        # if a_e != v_e:
-        #     dist = a_e - v_e
-        #     audio_feats = audio_feats[:,:-dist]
-
-        # Process segments and labels
+            resize_audio_feats = F.interpolate(
+                audio_feats.unsqueeze(0),
+                size=feats.size(1),
+                mode='linear',
+                align_corners=False
+            )
+            audio_feats = resize_audio_feats.squeeze(0)
+            
         feat_stride = self.feat_stride * self.downsample_rate
         feat_offset = 0.5 * self.num_frames / feat_stride
         if video_item['segments'] is not None:

@@ -1,9 +1,10 @@
-dataset_name: anet
+dataset_name: anet-audio
 train_split: ['training']
 val_split: ['validation']
 dataset: {
   json_file: /home/ed/actionformer_release/data/anet/anet1.3_tsp_filtered.json,
   feat_folder: /mnt/welles/scratch/datasets/Activity-Net/v1-3/tsp_feats/tsp_features,
+  audio_folder: /mnt/welles/scratch/datasets/Activity-Net/v1-3/vgg_feats,
   file_prefix: v_,
   file_ext: .npy,
   num_classes: 1,
@@ -16,6 +17,9 @@ dataset: {
   # upsample the features to a fixed length of 192
   max_seq_len: 192,
   force_upsampling: True,
+  use_audio: True,
+  audio_format: vgg,
+  audio_fuse: late,
 }
 model: {
   fpn_type: identity,
@@ -25,12 +29,20 @@ model: {
   # shrink the model for reduced input feature channels
   n_head: 4,
   embd_dim: 256,
+  audio_embd_dim: 128,
   fpn_dim: 256,
   head_dim: 256,
+  fpn_norm: groupnorm,
   use_abs_pe: True,
+
+  backbone_type: convPooler,
+  backbone_arch: [2, 5],
+  audio_embd_dim: 128,
+  audio_fusion_loc: ["pre-neck", "pre-cls"],  # pre-neck, pre-backbone, pre-cls, pre-reg
+  audio_fusion_method: max_pool, # concat, sum, cross_att
 }
 opt: {
-  learning_rate: 0.001,
+  learning_rate: 0.0001,
   epochs: 10,
   weight_decay: 0.05,
 }
@@ -44,8 +56,9 @@ train_cfg: {
   center_sample: radius,
   center_sample_radius: 1.5,
   label_smoothing: 0.1,
-  droppath: 0.1,
+  droppath: 0.2,
   loss_weight: 2.0,
+  use_audio: True
 }
 
 # similar to THUMOS

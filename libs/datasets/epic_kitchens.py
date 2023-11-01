@@ -246,8 +246,6 @@ class EpicKitchensDataset(Dataset):
         return data_dict
 
 
-
-
 @register_dataset("epic")
 class EpicKitchensDataset(Dataset):
     def __init__(
